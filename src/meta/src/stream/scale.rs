@@ -51,10 +51,12 @@ impl<S> GlobalStreamManager<S> where S: MetaStore {
         let mut actor_map = HashMap::new();
         let mut actor_status = BTreeMap::new();
         let mut parallel_unit_id_to_actor_id = HashMap::new();
+        let mut fragment_actors = HashMap::new();
         for (_, table_fragments) in &table_fragments_map {
             chain_actor_ids.extend(table_fragments.chain_actor_ids());
             let table_actor_status = table_fragments.actor_status.clone();
             for (fragment_id, fragment) in &table_fragments.fragments {
+                fragment_actors.insert(*fragment_id, fragment.actors.clone());
                 for actor in &fragment.actors {
                     actor_map.insert(actor.actor_id, actor.clone());
 
@@ -65,7 +67,6 @@ impl<S> GlobalStreamManager<S> where S: MetaStore {
             }
             actor_status.extend(table_actor_status);
         }
-
 
         // then, we collect all available upstream and downstream
         let mut downstream_actors = HashMap::new();
@@ -85,10 +86,6 @@ impl<S> GlobalStreamManager<S> where S: MetaStore {
             }
         }
 
-        //
-        // // if add.len == removed.len, enter migration logic
-        // let mut actor_migration_plan = HashMap::new();
-
         let mut to_remove = HashMap::new();
         let mut to_add = HashMap::new();
 
@@ -97,102 +94,152 @@ impl<S> GlobalStreamManager<S> where S: MetaStore {
                 bail!("only migration is supported now");
             }
 
-            for (removed_parallel_unit_id, added_parallel_unit_id) in removed_parallel_units.iter().zip_eq(added_parallel_units) {
+            for removed_parallel_unit_id in removed_parallel_units {
                 let fragment_parallel_unit_id = (*fragment_id, *removed_parallel_unit_id);
-                // if let Some(actor_id) = parallel_unit_id_to_actor_id.get(&fragment_parallel_unit_id) {
-                //     actor_migration_plan.insert(*actor_id as ActorId, (removed_parallel_unit_id, added_parallel_unit_id));
-                // } else {
-                //     bail!("could not find actor id for parallel_unit")
-                // }
-            }
-        }
-
-
-
-        // generate new actor ids
-        let mut recreated_actor_ids = HashMap::new();
-        for (actor_id, _) in &actor_migration_plan {
-            let id = self
-                .id_gen_manager
-                .generate::<{ IdCategory::Actor }>()
-                .await? as ActorId;
-
-            recreated_actor_ids.insert(*actor_id, id);
-        }
-
-        // dump actor info, and modify actor upstream/downstream
-        let mut recreated_actors = HashMap::new();
-        for (actor_id, _) in &actor_migration_plan {
-            let new_actor_id = recreated_actor_ids.get(actor_id).unwrap();
-
-            let old_actor = actor_map.get(actor_id).unwrap();
-            let mut new_actor = old_actor.clone();
-
-            if chain_actor_ids.contains(actor_id) {
-                todo!()
-                // let upstream_actor_ids = upstream_actors.get(actor_id).unwrap();
-                // assert_eq!(upstream_actor_ids.len(), 1);
-                // let (upstream_actor_id, _) = upstream_actor_ids.iter().next().unwrap();
-                // if actor_ids.contains(upstream_actor_id) {
-                //     new_actor.same_worker_node_as_upstream = false;
-                // }
-            }
-
-            for upstream_actor_id in &mut new_actor.upstream_actor_id {
-                if let Some(new_actor_id) = recreated_actor_ids.get(upstream_actor_id) {
-                    *upstream_actor_id = *new_actor_id as u32;
+                if let Some(actor_id) = parallel_unit_id_to_actor_id.get(&fragment_parallel_unit_id) {
+                    to_remove.insert(*actor_id as ActorId, (*fragment_id, *removed_parallel_unit_id));
                 }
             }
 
-            for dispatcher in &mut new_actor.dispatcher {
-                for downstream_actor_id in &mut dispatcher.downstream_actor_id {
-                    if let Some(new_actor_id) = recreated_actor_ids.get(downstream_actor_id) {
-                        *downstream_actor_id = *new_actor_id as u32;
-                    }
+            for added_parallel_unit_id in added_parallel_units {
+                let id = self
+                    .id_gen_manager
+                    .generate::<{ IdCategory::Actor }>()
+                    .await? as ActorId;
+                //to_add.insert((*fragment_id, id), *added_parallel_unit_id);
+
+                to_add.entry(*fragment_id).or_insert(HashMap::new()).insert(id, *added_parallel_unit_id);
+            }
+        }
+
+        for (fragment_id, actor_parallel_unit_map) in &to_add {
+            let mut sample_actor = fragment_actors.get(&fragment_id).unwrap().iter().next().cloned().unwrap();
+
+            let mut new_upstream_actor_ids = Vec::with_capacity(sample_actor.upstream_actor_id.len());
+
+            let mut upstream_fragment_ids = HashSet::new();
+            for upstream_actor_id in &sample_actor.upstream_actor_id {
+                if let Some(upstream_actor) = actor_map.get(upstream_actor_id) {
+                    upstream_fragment_ids.insert(upstream_actor.fragment_id as FragmentId);
+                }
+
+                if to_remove.contains_key(upstream_actor_id) {
+                    continue;
+                }
+
+                new_upstream_actor_ids.push(*upstream_actor_id);
+            }
+
+            for upstream_fragment_id in upstream_fragment_ids {
+                if let Some(upstream_actor_parallel_unit_map) = to_add.get(&upstream_fragment_id) {
+                    new_upstream_actor_ids.extend(upstream_actor_parallel_unit_map.keys().cloned().collect_vec());
                 }
             }
 
-            new_actor.actor_id = *new_actor_id;
-            recreated_actors.insert(*actor_id as ActorId, new_actor);
-        }
+            sample_actor.upstream_actor_id = new_upstream_actor_ids;
 
-        let mut node_hanging_channels: HashMap<WorkerId, Vec<HangingChannel>> = HashMap::new();
+            let mut new_downstream_actor_ids = Vec::with_capacity(sample_actor.upstream_actor_id.len());
 
-        for (actor_id, &(from, to)) in &actor_migration_plan {
-            // let worker_id = actor_id_to_target_id.get(actor_id).unwrap();
-            // let worker = worker_nodes.get(worker_id).unwrap();
-            // if let Some(upstream_actor_ids) = upstream_actors.get(actor_id) {
-            //     for (upstream_actor_id, _upstream_dispatcher_id) in upstream_actor_ids {
-            //         if actor_ids.contains(upstream_actor_id) {
-            //             continue;
-            //         }
+            // let mut upstream_fragment_ids = HashSet::new();
+
+            for dispatcher in &mut sample_actor.dispatcher {
+                for downstream_actor_id in dispatcher.downstream_actor_id {
+
+                }
+            }
+            // for upstream_actor_id in &sample_actor.upstream_actor_id {
+            //     if let Some(upstream_actor) = actor_map.get(upstream_actor_id) {
+            //         upstream_fragment_ids.insert(upstream_actor.fragment_id as FragmentId);
+            //     }
             //
-            //         let new_actor_id = recreated_actor_ids.get(actor_id).unwrap();
+            //     if to_remove.contains_key(upstream_actor_id) {
+            //         continue;
+            //     }
             //
-            //         let upstream_worker_id = actor_id_to_worker_id.get(upstream_actor_id).unwrap();
+            //     new_upstream_actor_ids.push(*upstream_actor_id);
+            // }
             //
-            //         // note: Before PR #4045, we need to remove the local-to-local hanging_channels
-            //         // if worker_id == upstream_worker_id {
-            //         //     continue;
-            //         // }
-            //
-            //         node_hanging_channels
-            //             .entry(*upstream_worker_id)
-            //             .or_default()
-            //             .push(HangingChannel {
-            //                 upstream: Some(ActorInfo {
-            //                     actor_id: *upstream_actor_id,
-            //                     host: None,
-            //                 }),
-            //                 downstream: Some(ActorInfo {
-            //                     actor_id: *new_actor_id,
-            //                     host: worker.host.clone(),
-            //                 }),
-            //             })
+            // for upstream_fragment_id in upstream_fragment_ids {
+            //     if let Some(upstream_actor_parallel_unit_map) = to_add.get(&upstream_fragment_id) {
+            //         new_upstream_actor_ids.extend(upstream_actor_parallel_unit_map.keys().cloned().collect_vec());
             //     }
             // }
         }
 
+        //
+        // // dump actor info, and modify actor upstream/downstream
+        // let mut recreated_actors = HashMap::new();
+        // for (fragment_id, actor_id) in &to_remove {
+        //     let new_actor_id = recreated_actor_ids.get(actor_id).unwrap();
+        //
+        //     let old_actor = actor_map.get(actor_id).unwrap();
+        //     let mut new_actor = old_actor.clone();
+        //
+        //     if chain_actor_ids.contains(actor_id) {
+        //         todo!()
+        //         // let upstream_actor_ids = upstream_actors.get(actor_id).unwrap();
+        //         // assert_eq!(upstream_actor_ids.len(), 1);
+        //         // let (upstream_actor_id, _) = upstream_actor_ids.iter().next().unwrap();
+        //         // if actor_ids.contains(upstream_actor_id) {
+        //         //     new_actor.same_worker_node_as_upstream = false;
+        //         // }
+        //     }
+        //
+        //     for upstream_actor_id in &mut new_actor.upstream_actor_id {
+        //         if let Some(new_actor_id) = recreated_actor_ids.get(upstream_actor_id) {
+        //             *upstream_actor_id = *new_actor_id as u32;
+        //         }
+        //     }
+        //
+        //     for dispatcher in &mut new_actor.dispatcher {
+        //         for downstream_actor_id in &mut dispatcher.downstream_actor_id {
+        //             if let Some(new_actor_id) = recreated_actor_ids.get(downstream_actor_id) {
+        //                 *downstream_actor_id = *new_actor_id as u32;
+        //             }
+        //         }
+        //     }
+        //
+        //     new_actor.actor_id = *new_actor_id;
+        //     recreated_actors.insert(*actor_id as ActorId, new_actor);
+        // }
+        //
+        // let mut node_hanging_channels: HashMap<WorkerId, Vec<HangingChannel>> = HashMap::new();
+        //
+        // for (actor_id, &(from, to)) in &actor_migration_plan {
+        //     // let worker_id = actor_id_to_target_id.get(actor_id).unwrap();
+        //     // let worker = worker_nodes.get(worker_id).unwrap();
+        //     // if let Some(upstream_actor_ids) = upstream_actors.get(actor_id) {
+        //     //     for (upstream_actor_id, _upstream_dispatcher_id) in upstream_actor_ids {
+        //     //         if actor_ids.contains(upstream_actor_id) {
+        //     //             continue;
+        //     //         }
+        //     //
+        //     //         let new_actor_id = recreated_actor_ids.get(actor_id).unwrap();
+        //     //
+        //     //         let upstream_worker_id = actor_id_to_worker_id.get(upstream_actor_id).unwrap();
+        //     //
+        //     //         // note: Before PR #4045, we need to remove the local-to-local hanging_channels
+        //     //         // if worker_id == upstream_worker_id {
+        //     //         //     continue;
+        //     //         // }
+        //     //
+        //     //         node_hanging_channels
+        //     //             .entry(*upstream_worker_id)
+        //     //             .or_default()
+        //     //             .push(HangingChannel {
+        //     //                 upstream: Some(ActorInfo {
+        //     //                     actor_id: *upstream_actor_id,
+        //     //                     host: None,
+        //     //                 }),
+        //     //                 downstream: Some(ActorInfo {
+        //     //                     actor_id: *new_actor_id,
+        //     //                     host: worker.host.clone(),
+        //     //                 }),
+        //     //             })
+        //     //     }
+        //     // }
+        // }
+        //
 
 
         todo!()
