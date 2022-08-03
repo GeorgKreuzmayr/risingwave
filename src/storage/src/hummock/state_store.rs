@@ -20,7 +20,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use itertools::Itertools;
 use risingwave_hummock_sdk::key::{key_with_epoch, next_key};
-use risingwave_hummock_sdk::LocalSstableInfo;
+use risingwave_hummock_sdk::{HummockEpoch, LocalSstableInfo};
 use risingwave_pb::hummock::LevelType;
 
 use super::iterator::{
@@ -552,11 +552,11 @@ impl StateStore for HummockStorage {
         async move { Ok(self.local_version_manager.wait_epoch(epoch).await?) }
     }
 
-    fn sync(&self, epoch: Option<u64>) -> Self::SyncFuture<'_> {
+    fn sync(&self, epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
         async move {
             let size = self
                 .local_version_manager()
-                .sync_shared_buffer(epoch)
+                .sync_shared_buffer(epoch_range)
                 .await?;
             Ok(size)
         }

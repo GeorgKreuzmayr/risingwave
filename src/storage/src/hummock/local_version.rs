@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ops::RangeBounds;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
@@ -23,6 +24,7 @@ use risingwave_hummock_sdk::compaction_group::hummock_version_ext::HummockVersio
 use risingwave_hummock_sdk::{CompactionGroupId, HummockEpoch, HummockVersionId};
 use risingwave_pb::hummock::{HummockVersion, Level};
 use tokio::sync::mpsc::UnboundedSender;
+use crate::hummock::shared_buffer::UncommittedData;
 
 use super::shared_buffer::SharedBuffer;
 
@@ -30,6 +32,7 @@ use super::shared_buffer::SharedBuffer;
 pub struct LocalVersion {
     shared_buffer: BTreeMap<HummockEpoch, Arc<RwLock<SharedBuffer>>>,
     pinned_version: Arc<PinnedVersion>,
+    sync_uncommited_sst: BTreeMap<HummockEpoch,UncommittedData>,
     pub version_ids_in_use: BTreeSet<HummockVersionId>,
 }
 
@@ -44,6 +47,7 @@ impl LocalVersion {
             shared_buffer: BTreeMap::default(),
             pinned_version: Arc::new(PinnedVersion::new(version, unpin_worker_tx)),
             version_ids_in_use,
+            sync_uncommited_sst: Default::default(),
         }
     }
 
@@ -59,6 +63,17 @@ impl LocalVersion {
         &self,
     ) -> impl Iterator<Item = (&HummockEpoch, &Arc<RwLock<SharedBuffer>>)> {
         self.shared_buffer.iter()
+    }
+
+    /// Returns all shared buffer less than or equal to epoch
+    pub fn scan_shared_buffer<R>(
+        &self,
+        epoch_range: R,
+    ) -> impl Iterator<Item = (&HummockEpoch, &Arc<RwLock<SharedBuffer>>)>
+    where
+        R: RangeBounds<u64>,
+    {
+        self.shared_buffer.range(epoch_range)
     }
 
     pub fn new_shared_buffer(

@@ -18,7 +18,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use risingwave_common::catalog::TableId;
 use risingwave_common::util::epoch::Epoch;
-use risingwave_hummock_sdk::LocalSstableInfo;
+use risingwave_hummock_sdk::{HummockEpoch, LocalSstableInfo};
 
 use crate::error::StorageResult;
 use crate::monitor::{MonitoredStateStore, StateStoreMetrics};
@@ -193,7 +193,7 @@ pub trait StateStore: Send + Sync + 'static + Clone {
     /// Syncs buffered data to S3.
     /// If the epoch is None, all buffered data will be synced.
     /// Otherwise, only data of the provided epoch will be synced.
-    fn sync(&self, epoch: Option<u64>) -> Self::SyncFuture<'_>;
+    fn sync(&self, epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_>;
 
     /// Creates a [`MonitoredStateStore`] from this state store, with given `stats`.
     fn monitored(self, stats: Arc<StateStoreMetrics>) -> MonitoredStateStore<Self> {

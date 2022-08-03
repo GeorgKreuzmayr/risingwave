@@ -191,7 +191,7 @@ async fn test_update_uncommitted_ssts() {
             assert_eq!(task_size, batches[0].size());
         }
         shared_buffer_guard.succeed_upload_task(
-            task_id,
+            Some(task_id),
             vec![(StaticCompactionGroupId::StateDefault.into(), sst1.clone())],
         );
     }
@@ -246,7 +246,7 @@ async fn test_update_uncommitted_ssts() {
             assert_eq!(task_size, batches[1].size());
         }
         shared_buffer_guard.succeed_upload_task(
-            task_id,
+            Some(task_id),
             vec![(StaticCompactionGroupId::StateDefault.into(), sst2.clone())],
         );
     }

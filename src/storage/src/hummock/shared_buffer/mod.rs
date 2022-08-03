@@ -208,10 +208,10 @@ pub enum SharedBufferEvent {
     /// An epoch is going to be synced. Once the event is processed, there will be no more flush
     /// task on this epoch. Previous concurrent flush task join handle will be returned by the join
     /// handle sender.
-    SyncEpoch(HummockEpoch, oneshot::Sender<Vec<JoinHandle<()>>>),
+    SyncEpoch(Vec<HummockEpoch>, oneshot::Sender<Vec<JoinHandle<()>>>),
 
     /// An epoch has been synced.
-    EpochSynced(HummockEpoch),
+    EpochSynced(Vec<HummockEpoch>),
 
     /// Clear shared buffer and reset all states
     Clear(oneshot::Sender<()>),
@@ -427,26 +427,29 @@ impl SharedBuffer {
         }
     }
 
-    pub fn fail_upload_task(&mut self, order_index: OrderIndex) {
-        let (payload, task_write_batch_size) = self
-            .uploading_tasks
-            .remove(&order_index)
-            .unwrap_or_else(|| {
-                panic!(
-                    "the order index should exist {} when fail an upload task",
-                    order_index
-                )
-            });
-        self.global_upload_task_size
-            .fetch_sub(task_write_batch_size, Relaxed);
-        self.uncommitted_data.extend(payload);
+    pub fn fail_upload_task(&mut self, order_index: Option<OrderIndex>) {
+        if let Some(order_index) = order_index {
+            let (payload, task_write_batch_size) = self
+                .uploading_tasks
+                .remove(&order_index)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "the order index should exist {} when fail an upload task",
+                        order_index
+                    )
+                });
+            self.global_upload_task_size
+                .fetch_sub(task_write_batch_size, Relaxed);
+            self.uncommitted_data.extend(payload);
+        }
     }
 
     pub fn succeed_upload_task(
         &mut self,
-        order_index: OrderIndex,
+        order_index: Option<OrderIndex>,
         new_sst: Vec<LocalSstableInfo>,
     ) -> Vec<LocalSstableInfo> {
+        let order_index = order_index.unwrap_or(0);
         let (payload, task_write_batch_size) = self
             .uploading_tasks
             .remove(&order_index)
@@ -683,7 +686,9 @@ mod tests {
         assert_eq!(payload2[1], vec![UncommittedData::Batch(batch3.clone())]);
         assert_eq!(task_size, batch3.size() + batch4.size());
 
-        shared_buffer.borrow_mut().fail_upload_task(order_index1);
+        shared_buffer
+            .borrow_mut()
+            .fail_upload_task(Some(order_index1));
         let (order_index1, payload1, task_size) = shared_buffer
             .borrow_mut()
             .new_upload_task(FlushWriteBatch)
@@ -698,11 +703,13 @@ mod tests {
 
         let sst1 = gen_dummy_sst_info(1, vec![batch1, batch2]);
         shared_buffer.borrow_mut().succeed_upload_task(
-            order_index1,
+            Some(order_index1),
             vec![(StaticCompactionGroupId::StateDefault.into(), sst1.clone())],
         );
 
-        shared_buffer.borrow_mut().fail_upload_task(order_index2);
+        shared_buffer
+            .borrow_mut()
+            .fail_upload_task(Some(order_index2));
 
         let (order_index3, payload3, task_size) = shared_buffer
             .borrow_mut()

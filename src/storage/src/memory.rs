@@ -22,6 +22,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use lazy_static::lazy_static;
 use parking_lot::RwLock;
+use risingwave_hummock_sdk::HummockEpoch;
 
 use crate::error::{StorageError, StorageResult};
 use crate::hummock::HummockError;
@@ -238,7 +239,7 @@ impl StateStore for MemoryStateStore {
         }
     }
 
-    fn sync(&self, _epoch: Option<u64>) -> Self::SyncFuture<'_> {
+    fn sync(&self, _epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
         async move {
             // memory backend doesn't support push to S3, so this is a no-op
             Ok(0)

@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::Future;
-use risingwave_hummock_sdk::LocalSstableInfo;
+use risingwave_hummock_sdk::{HummockEpoch, LocalSstableInfo};
 use tracing::error;
 
 use super::StateStoreMetrics;
@@ -230,12 +230,12 @@ where
         }
     }
 
-    fn sync(&self, epoch: Option<u64>) -> Self::SyncFuture<'_> {
+    fn sync(&self, epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
         async move {
             let timer = self.stats.shared_buffer_to_l0_duration.start_timer();
             let size = self
                 .inner
-                .sync(epoch)
+                .sync(epoch_range)
                 .await
                 .inspect_err(|e| error!("Failed in sync: {:?}", e))?;
             timer.observe_duration();

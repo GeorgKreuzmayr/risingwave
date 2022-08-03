@@ -32,7 +32,7 @@ use risingwave_hummock_sdk::key::{
     extract_table_id_and_epoch, get_epoch, get_table_id, Epoch, FullKey,
 };
 use risingwave_hummock_sdk::key_range::KeyRange;
-use risingwave_hummock_sdk::{CompactionGroupId, VersionedComparator};
+use risingwave_hummock_sdk::{CompactionGroupId, HummockEpoch, VersionedComparator};
 use risingwave_pb::hummock::{
     CompactTask, LevelType, SstableInfo, SubscribeCompactTasksResponse, VacuumTask,
 };
@@ -247,6 +247,7 @@ impl Compactor {
     pub async fn compact_shared_buffer_by_compaction_group(
         context: Arc<CompactorContext>,
         payload: UploadTaskPayload,
+        water_epoch: HummockEpoch,
     ) -> HummockResult<Vec<(CompactionGroupId, Sstable, Vec<u32>)>> {
         let mut grouped_payload: HashMap<CompactionGroupId, UploadTaskPayload> = HashMap::new();
         for uncommitted_list in payload {
@@ -271,14 +272,13 @@ impl Compactor {
         for (id, group_payload) in grouped_payload {
             let id_copy = id;
             futures.push(
-                Compactor::compact_shared_buffer(context.clone(), group_payload).map_ok(
-                    move |results| {
+                Compactor::compact_shared_buffer(context.clone(), group_payload, water_epoch)
+                    .map_ok(move |results| {
                         results
                             .into_iter()
                             .map(move |result| (id_copy, result.0, result.1))
                             .collect_vec()
-                    },
-                ),
+                    }),
             );
         }
         // Note that the output is reordered compared with input `payload`.
@@ -294,6 +294,7 @@ impl Compactor {
     pub async fn compact_shared_buffer(
         context: Arc<CompactorContext>,
         payload: UploadTaskPayload,
+        water_epoch: HummockEpoch,
     ) -> HummockResult<Vec<(Sstable, Vec<u32>)>> {
         let mut start_user_keys = payload
             .iter()
@@ -344,7 +345,7 @@ impl Compactor {
         let compact_task = CompactTask {
             input_ssts: vec![],
             splits: splits.into_iter().map(|v| v.into()).collect_vec(),
-            watermark: u64::MAX,
+            watermark: water_epoch,
             sorted_output_ssts: vec![],
             task_id: 0,
             target_level: 0,
