@@ -85,7 +85,7 @@ impl fmt::Display for LogicalJoin {
                     &format_args!(
                         "{:?}",
                         &IndicesDisplay {
-                            vec: self.output_indices(),
+                            indices: self.output_indices(),
                             input_schema: &concat_schema,
                         }
                     ),
@@ -95,15 +95,6 @@ impl fmt::Display for LogicalJoin {
 
         builder.finish()
     }
-}
-
-fn has_duplicate_index(indices: &[usize]) -> bool {
-    for i in 1..indices.len() {
-        if indices[i..].contains(&indices[i - 1]) {
-            return true;
-        }
-    }
-    false
 }
 
 impl LogicalJoin {
@@ -120,7 +111,6 @@ impl LogicalJoin {
         on: Condition,
         output_indices: Vec<usize>,
     ) -> Self {
-        assert!(!has_duplicate_index(&output_indices));
         let ctx = left.ctx();
         let schema = Self::derive_schema(left.schema(), right.schema(), join_type, &output_indices);
         let pk_indices = Self::derive_pk(
@@ -503,14 +493,17 @@ impl LogicalJoin {
         let eq_col_warn_message = "In Lookup Join, the right columns of the equality join \
         predicates must be the same as the primary key. A different join will be used instead.";
 
-        let order_col_indices = table_desc.order_column_indices();
-        if order_col_indices.len() != predicate.right_eq_indexes().len() {
+        let order_col_ids = table_desc.order_column_ids();
+        if order_col_ids.len() != predicate.right_eq_indexes().len() {
             log::warn!("{}", eq_col_warn_message);
             return None;
         }
 
-        for (i, eq_idx) in predicate.right_eq_indexes().into_iter().enumerate() {
-            if order_col_indices[i] != output_column_ids[eq_idx].get_id() as usize {
+        for (order_col_id, eq_idx) in order_col_ids
+            .into_iter()
+            .zip_eq(predicate.right_eq_indexes())
+        {
+            if order_col_id != output_column_ids[eq_idx] {
                 log::warn!("{}", eq_col_warn_message);
                 return None;
             }

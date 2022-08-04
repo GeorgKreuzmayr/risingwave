@@ -92,7 +92,8 @@ message BarrierCompleteResponse {
     hummock.SstableInfo sst = 2;
   }
   repeated GroupedSstableInfo synced_sstables = 4;
-  bool is_sync = 5;
+  uint32 worker_id = 5;
+  bool is_sync = 6;
 }
 
 // Before starting streaming, the leader node broadcast the actor-host table to needed workers.

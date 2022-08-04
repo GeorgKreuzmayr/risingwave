@@ -169,6 +169,7 @@ impl StreamService for StreamServiceImpl {
                 })
                 .collect_vec(),
             is_sync,
+            worker_id: self.env.worker_id(),
         }))
     }
 
