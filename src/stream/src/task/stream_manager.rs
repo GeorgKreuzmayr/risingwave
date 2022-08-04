@@ -195,13 +195,13 @@ impl LocalStreamManager {
         result
     }
 
-    pub async fn sync_epoch(&self, epoch: u64) -> Vec<LocalSstableInfo> {
+    pub async fn sync_epoch(&self, epoch: u64) -> (Vec<LocalSstableInfo>, bool) {
         let last_epoch;
         loop {
             let max_sync_epoch = self.max_sync_epoch.load(Ordering::Relaxed);
             if epoch <= max_sync_epoch {
                 tracing::info!("sync no {:?},{:?}", epoch, max_sync_epoch);
-                return vec![];
+                return (vec![], false);
             }
             if self
                 .max_sync_epoch
@@ -212,7 +212,13 @@ impl LocalStreamManager {
                 break;
             }
         }
-        dispatch_state_store!(self.state_store(), store, {
+        let timer = self
+            .core
+            .lock()
+            .streaming_metrics
+            .barrier_sync_latency
+            .start_timer();
+        let local_sst_info = dispatch_state_store!(self.state_store(), store, {
             match store.sync((last_epoch, epoch)).await {
                 Ok(_) => store.get_uncommitted_ssts(epoch),
                 // TODO: Handle sync failure by propagating it back to global barrier manager
@@ -221,7 +227,9 @@ impl LocalStreamManager {
                     epoch, e
                 ),
             }
-        })
+        });
+        timer.observe_duration();
+        (local_sst_info, true)
     }
 
     pub async fn clear_storage_buffer(&self) {
