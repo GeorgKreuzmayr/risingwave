@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use itertools::Itertools;
 use risingwave_hummock_sdk::key::user_key;
-use risingwave_hummock_sdk::{is_remote_sst_id, HummockEpoch, LocalSstableInfo};
+use risingwave_hummock_sdk::{HummockEpoch, LocalSstableInfo};
 use risingwave_pb::hummock::{KeyRange, SstableInfo};
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
@@ -447,7 +447,7 @@ impl SharedBuffer {
     pub fn succeed_upload_task(
         &mut self,
         order_index: Option<OrderIndex>,
-        new_sst: Vec<LocalSstableInfo>,
+        new_sst: Option<Vec<LocalSstableInfo>>,
     ) -> Vec<LocalSstableInfo> {
         let order_index = order_index.unwrap_or(0);
         let (payload, task_write_batch_size) = self
@@ -461,18 +461,20 @@ impl SharedBuffer {
             });
         self.global_upload_task_size
             .fetch_sub(task_write_batch_size, Relaxed);
-        for sst in new_sst {
-            let data = UncommittedData::Sst(sst);
-            let insert_result = self
-                .uncommitted_data
-                .insert((data.end_user_key().to_vec(), order_index), data);
-            assert!(
-                insert_result.is_none(),
-                "duplicate data end key and order index when inserting an SST. \
+        if let Some(new_sst) = new_sst {
+            for sst in new_sst {
+                let data = UncommittedData::Sst(sst);
+                let insert_result = self
+                    .uncommitted_data
+                    .insert((data.end_user_key().to_vec(), order_index), data);
+                assert!(
+                    insert_result.is_none(),
+                    "duplicate data end key and order index when inserting an SST. \
                 Order index: {}. Previous data: {:?}",
-                order_index,
-                insert_result,
-            );
+                    order_index,
+                    insert_result,
+                );
+            }
         }
         let mut previous_sst = Vec::new();
         for data in payload.into_values() {
@@ -489,27 +491,15 @@ impl SharedBuffer {
         previous_sst
     }
 
-    pub fn get_ssts_to_commit(&self) -> Vec<LocalSstableInfo> {
+    pub fn get_ssts_to_commit(&self) {
         assert!(
             self.uploading_tasks.is_empty(),
             "when committing sst there should not be uploading task"
         );
-        let mut ret = Vec::new();
-        for data in self.uncommitted_data.values() {
-            match data {
-                UncommittedData::Batch(_) => {
-                    panic!("there should not be any batch when committing sst");
-                }
-                UncommittedData::Sst((compaction_group_id, sst)) => {
-                    assert!(
-                        is_remote_sst_id(sst.id),
-                        "all sst should be remote when trying to get ssts to commit"
-                    );
-                    ret.push((*compaction_group_id, sst.clone()));
-                }
-            }
-        }
-        ret
+        assert!(
+            self.uncommitted_data.is_empty(),
+            "when committing sst there should not be uncommitted_data in shared buffer"
+        );
     }
 
     pub fn size(&self) -> usize {
@@ -704,7 +694,10 @@ mod tests {
         let sst1 = gen_dummy_sst_info(1, vec![batch1, batch2]);
         shared_buffer.borrow_mut().succeed_upload_task(
             Some(order_index1),
-            vec![(StaticCompactionGroupId::StateDefault.into(), sst1.clone())],
+            Some(vec![(
+                StaticCompactionGroupId::StateDefault.into(),
+                sst1.clone(),
+            )]),
         );
 
         shared_buffer

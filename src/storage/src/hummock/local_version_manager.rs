@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
@@ -47,7 +47,7 @@ use crate::hummock::conflict_detector::ConflictDetector;
 use crate::hummock::shared_buffer::shared_buffer_batch::SharedBufferItem;
 use crate::hummock::shared_buffer::shared_buffer_uploader::UploadTaskPayload;
 use crate::hummock::shared_buffer::UploadTaskType::{FlushWriteBatch, SyncEpoch};
-use crate::hummock::shared_buffer::{OrderIndex, SharedBufferEvent, WriteRequest};
+use crate::hummock::shared_buffer::{OrderIndex, SharedBufferEvent, UncommittedData, WriteRequest};
 use crate::hummock::utils::validate_table_key_range;
 use crate::hummock::{
     HummockEpoch, HummockError, HummockResult, HummockVersionId, SstableIdManagerRef,
@@ -515,9 +515,9 @@ impl LocalVersionManager {
     /// Sync all shared buffer less than or equal to epoch
     pub async fn sync_all_shared_buffer(&self, epoch_range: (u64, u64)) -> HummockResult<usize> {
         let epoch = epoch_range.1;
-        self.local_version
-            .write()
-            .new_shared_buffer(epoch, self.buffer_tracker.global_upload_task_size.clone());
+        // self.local_version
+        //     .write()
+        //     .new_shared_buffer(epoch, self.buffer_tracker.global_upload_task_size.clone());
         let mut order_index_map = HashMap::default();
         let mut task_write_batch_size = 0;
         let mut all_order_sort_uncommit_data = vec![];
@@ -567,24 +567,40 @@ impl LocalVersionManager {
             .shared_buffer_uploader
             .flush(epoch, is_local, task_payload, water_epoch)
             .await;
-        self.local_version
-            .read()
+        let mut local_version_guard = self.local_version.write();
+        local_version_guard
             .scan_shared_buffer((Excluded(water_epoch), Included(epoch)))
             .for_each(|(key, value)| {
                 let order_index = order_index_map.get(key).unwrap();
                 let mut shared_buffer_guard = value.write();
                 match &task_result {
-                    Ok(ssts) => {
-                        shared_buffer_guard.succeed_upload_task(*order_index, ssts.clone());
-                        // Ok(())
+                    Ok(sst) => {
+                        let sst_info = if is_local { Some(sst.clone()) } else { None };
+                        shared_buffer_guard.succeed_upload_task(*order_index, sst_info);
                     }
                     Err(_e) => {
                         shared_buffer_guard.fail_upload_task(*order_index);
-                        // Err(e)
                     }
                 };
             });
-
+        if !is_local {
+            if let Ok(new_sst) = &task_result {
+                let mut data_map = BTreeMap::default();
+                for sst in new_sst {
+                    let data = UncommittedData::Sst(sst.clone());
+                    data_map.insert(data.end_user_key().to_vec(), data);
+                }
+                let insert_result = local_version_guard
+                    .add_sync_uncommit_data(epoch, data_map.into_values().collect());
+                assert!(
+                    insert_result.is_none(),
+                    "duplicate data end key and order index when inserting an SST. \
+                epoch{:?} Previous data: {:?}",
+                    epoch,
+                    insert_result,
+                );
+            }
+        }
         self.buffer_tracker.send_event(SharedBufferEvent::MayFlush);
         let _a = task_result?;
         Ok(())
@@ -599,11 +615,11 @@ impl LocalVersionManager {
     }
 
     pub fn get_uncommitted_ssts(&self, epoch: HummockEpoch) -> Vec<LocalSstableInfo> {
-        self.local_version
-            .read()
-            .get_shared_buffer(epoch)
-            .map(|shared_buffer| shared_buffer.read().get_ssts_to_commit())
-            .unwrap_or_default()
+        let local_version_guard = self.local_version.read();
+        if let Some(shared_buffer) = local_version_guard.get_shared_buffer(epoch) {
+            shared_buffer.read().get_ssts_to_commit();
+        }
+        local_version_guard.get_sync_uncommit_data(epoch)
     }
 
     /// Pin a version with retry.

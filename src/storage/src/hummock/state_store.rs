@@ -39,7 +39,7 @@ use crate::hummock::shared_buffer::{
     build_ordered_merge_iter, OrderSortedUncommittedData, UncommittedData,
 };
 use crate::hummock::sstable::SstableIteratorReadOptions;
-use crate::hummock::utils::prune_ssts;
+use crate::hummock::utils::{filter_single_sst, prune_ssts};
 use crate::hummock::HummockResult;
 use crate::monitor::StoreLocalStatistic;
 use crate::storage_value::StorageValue;
@@ -97,7 +97,8 @@ impl HummockStorage {
         let iter_read_options = Arc::new(SstableIteratorReadOptions::default());
         let mut overlapped_iters = vec![];
 
-        let (shared_buffer_data, pinned_version) = self.read_filter(&read_options, &key_range)?;
+        let (shared_buffer_data, pinned_version, sync_uncommit_table) =
+            self.read_filter(&read_options, &key_range)?;
 
         let mut stats = StoreLocalStatistic::default();
 
@@ -116,6 +117,17 @@ impl HummockStorage {
                 .await?,
             ));
         }
+        overlapped_iters.push(HummockIteratorUnion::Second(
+            build_ordered_merge_iter::<T>(
+                &sync_uncommit_table,
+                self.sstable_store.clone(),
+                self.stats.clone(),
+                &mut stats,
+                iter_read_options.clone(),
+            )
+            .await?,
+        ));
+
         self.stats
             .iter_merge_sstable_counts
             .with_label_values(&["memory-iter"])
@@ -247,7 +259,8 @@ impl HummockStorage {
             Some(table_id) => Some(self.get_compaction_group_id(*table_id).await?),
         };
         let mut stats = StoreLocalStatistic::default();
-        let (shared_buffer_data, pinned_version) = self.read_filter(&read_options, &(key..=key))?;
+        let (shared_buffer_data, pinned_version, sync_uncommit_table) =
+            self.read_filter(&read_options, &(key..=key))?;
 
         // Return `Some(None)` means the key is deleted.
         let get_from_batch = |batch: &SharedBufferBatch| -> Option<Option<Bytes>> {
@@ -299,6 +312,28 @@ impl HummockStorage {
                 }
             }
         }
+        for data_list in sync_uncommit_table {
+            for data in data_list {
+                match data {
+                    UncommittedData::Batch(_) => {
+                        panic!("no batch in sync uncomit data");
+                    }
+                    UncommittedData::Sst((_, table_info)) => {
+                        let table = self
+                            .sstable_store
+                            .sstable(table_info.id, &mut stats)
+                            .await?;
+                        table_counts += 1;
+                        if let Some(v) = self
+                            .get_from_table(table, &internal_key, key, &read_options, &mut stats)
+                            .await?
+                        {
+                            return Ok(v);
+                        }
+                    }
+                }
+            }
+        }
 
         // See comments in HummockStorage::iter_inner for details about using compaction_group_id in
         // read/write path.
@@ -340,6 +375,7 @@ impl HummockStorage {
     ) -> HummockResult<(
         Vec<(Vec<SharedBufferBatch>, OrderSortedUncommittedData)>,
         Arc<PinnedVersion>,
+        OrderSortedUncommittedData,
     )>
     where
         R: RangeBounds<B>,
@@ -356,8 +392,25 @@ impl HummockStorage {
             .iter()
             .map(|shared_buffer| shared_buffer.get_overlap_data(key_range))
             .collect();
-
-        Ok((shared_buffer_data, read_version.pinned_version))
+        let sync_uncommited_sst = read_version
+            .sync_uncommited_sst
+            .iter()
+            .map(|sst_vec| {
+                sst_vec
+                    .iter()
+                    .filter(|sst| match sst {
+                        UncommittedData::Batch(_) => panic!("no batch in uncommit sst"),
+                        UncommittedData::Sst((_, info)) => filter_single_sst(info, key_range),
+                    })
+                    .cloned()
+                    .collect()
+            })
+            .collect();
+        Ok((
+            shared_buffer_data,
+            read_version.pinned_version,
+            sync_uncommited_sst,
+        ))
     }
 }
 

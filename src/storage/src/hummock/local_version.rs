@@ -21,18 +21,18 @@ use itertools::Itertools;
 use parking_lot::lock_api::ArcRwLockReadGuard;
 use parking_lot::{RawRwLock, RwLock};
 use risingwave_hummock_sdk::compaction_group::hummock_version_ext::HummockVersionExt;
-use risingwave_hummock_sdk::{CompactionGroupId, HummockEpoch, HummockVersionId};
-use risingwave_pb::hummock::{HummockVersion, Level};
+use risingwave_hummock_sdk::{is_remote_sst_id, CompactionGroupId, HummockEpoch, HummockVersionId};
+use risingwave_pb::hummock::{HummockVersion, Level, SstableInfo};
 use tokio::sync::mpsc::UnboundedSender;
-use crate::hummock::shared_buffer::UncommittedData;
 
 use super::shared_buffer::SharedBuffer;
+use crate::hummock::shared_buffer::{OrderSortedUncommittedData, UncommittedData};
 
 #[derive(Debug, Clone)]
 pub struct LocalVersion {
     shared_buffer: BTreeMap<HummockEpoch, Arc<RwLock<SharedBuffer>>>,
     pinned_version: Arc<PinnedVersion>,
-    sync_uncommited_sst: BTreeMap<HummockEpoch,UncommittedData>,
+    sync_uncommited_ssts: BTreeMap<HummockEpoch, Vec<UncommittedData>>,
     pub version_ids_in_use: BTreeSet<HummockVersionId>,
 }
 
@@ -47,7 +47,7 @@ impl LocalVersion {
             shared_buffer: BTreeMap::default(),
             pinned_version: Arc::new(PinnedVersion::new(version, unpin_worker_tx)),
             version_ids_in_use,
-            sync_uncommited_sst: Default::default(),
+            sync_uncommited_ssts: Default::default(),
         }
     }
 
@@ -63,6 +63,38 @@ impl LocalVersion {
         &self,
     ) -> impl Iterator<Item = (&HummockEpoch, &Arc<RwLock<SharedBuffer>>)> {
         self.shared_buffer.iter()
+    }
+
+    pub fn add_sync_uncommit_data(
+        &mut self,
+        epoch: HummockEpoch,
+        uncommit_data: Vec<UncommittedData>,
+    ) -> Option<Vec<UncommittedData>> {
+        self.sync_uncommited_ssts.insert(epoch, uncommit_data)
+    }
+
+    pub fn get_sync_uncommit_data(
+        &self,
+        epoch: HummockEpoch,
+    ) -> Vec<(CompactionGroupId, SstableInfo)> {
+        let mut ret = Vec::new();
+        if let Some(data_vec) = self.sync_uncommited_ssts.get(&epoch) {
+            for data in data_vec {
+                match data {
+                    UncommittedData::Batch(_) => {
+                        panic!("there should not be any batch when committing sst");
+                    }
+                    UncommittedData::Sst((compaction_group_id, sst)) => {
+                        assert!(
+                            is_remote_sst_id(sst.id),
+                            "all sst should be remote when trying to get ssts to commit"
+                        );
+                        ret.push((*compaction_group_id, sst.clone()));
+                    }
+                }
+            }
+        }
+        ret
     }
 
     /// Returns all shared buffer less than or equal to epoch
@@ -92,6 +124,8 @@ impl LocalVersion {
         if self.pinned_version.max_committed_epoch() < new_pinned_version.max_committed_epoch {
             self.shared_buffer
                 .retain(|epoch, _| epoch > &new_pinned_version.max_committed_epoch);
+            self.sync_uncommited_ssts
+                .retain(|epoch, _| epoch > &new_pinned_version.max_committed_epoch);
         }
 
         self.version_ids_in_use.insert(new_pinned_version.id);
@@ -105,7 +139,7 @@ impl LocalVersion {
 
     pub fn read_version(this: &RwLock<Self>, read_epoch: HummockEpoch) -> ReadVersion {
         use parking_lot::RwLockReadGuard;
-        let (pinned_version, shared_buffer) = {
+        let (pinned_version, (shared_buffer, sync_uncommited_sst)) = {
             let guard = this.read();
             let smallest_uncommitted_epoch = guard.pinned_version.max_committed_epoch() + 1;
             let pinned_version = guard.pinned_version.clone();
@@ -118,11 +152,18 @@ impl LocalVersion {
                         .rev() // Important: order by epoch descendingly
                         .map(|(_, shared_buffer)| shared_buffer.clone())
                         .collect();
+                    let mut sync_uncommited_sst = vec![];
+                    for (key, value) in &guard.sync_uncommited_ssts {
+                        sync_uncommited_sst.insert(0, value.clone());
+                        if key > &read_epoch {
+                            break;
+                        }
+                    }
                     RwLockReadGuard::unlock_fair(guard);
-                    result
+                    (result, sync_uncommited_sst)
                 } else {
                     RwLockReadGuard::unlock_fair(guard);
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 },
             )
         };
@@ -130,6 +171,7 @@ impl LocalVersion {
         ReadVersion {
             shared_buffer: shared_buffer.into_iter().map(|x| x.read_arc()).collect(),
             pinned_version,
+            sync_uncommited_sst,
         }
     }
 
@@ -193,5 +235,6 @@ impl PinnedVersion {
 pub struct ReadVersion {
     /// The shared buffer is sorted by epoch descendingly
     pub shared_buffer: Vec<ArcRwLockReadGuard<RawRwLock, SharedBuffer>>,
+    pub sync_uncommited_sst: OrderSortedUncommittedData,
     pub pinned_version: Arc<PinnedVersion>,
 }
