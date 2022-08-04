@@ -14,8 +14,8 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::ops::Bound::{Excluded, Included};
-use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
@@ -143,6 +143,7 @@ pub struct LocalVersionManager {
     buffer_tracker: BufferTracker,
     write_conflict_detector: Option<Arc<ConflictDetector>>,
     shared_buffer_uploader: Arc<SharedBufferUploader>,
+    max_sync_epoch: AtomicU64,
 }
 
 impl LocalVersionManager {
@@ -199,6 +200,7 @@ impl LocalVersionManager {
                 sstable_id_manager,
                 filter_key_extractor_manager.clone(),
             )),
+            max_sync_epoch: AtomicU64::new(0),
         });
 
         // Pin and get the latest version.
@@ -481,18 +483,32 @@ impl LocalVersionManager {
         Some((epoch, join_handle))
     }
 
-    pub async fn sync_shared_buffer(
-        &self,
-        epoch_range: (HummockEpoch, HummockEpoch),
-    ) -> HummockResult<usize> {
+    pub async fn sync_shared_buffer(&self, epoch: HummockEpoch) -> HummockResult<(usize, bool)> {
+        let last_epoch;
+        loop {
+            let max_sync_epoch = self.max_sync_epoch.load(Ordering::Relaxed);
+            if epoch <= max_sync_epoch {
+                tracing::info!("sync no {:?},{:?}", epoch, max_sync_epoch);
+                return Ok((0, false));
+            }
+            if self
+                .max_sync_epoch
+                .compare_exchange(max_sync_epoch, epoch, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                last_epoch = max_sync_epoch;
+                break;
+            }
+        }
+
         let epochs = self
             .local_version
             .read()
-            .scan_shared_buffer((Excluded(epoch_range.0), Included(epoch_range.1)))
+            .scan_shared_buffer((Excluded(last_epoch), Included(epoch)))
             .map(|(&key, _)| key)
             .collect_vec();
         if epochs.is_empty() {
-            return Ok(0);
+            return Ok((0, true));
         }
         let (tx, rx) = oneshot::channel();
         self.buffer_tracker
@@ -501,15 +517,11 @@ impl LocalVersionManager {
         for result in join_all(join_handles).await {
             result.expect("should be able to join the flush handle")
         }
-        tracing::info!(
-            "sync epoch vec:{:?},checkpoint epoch {:?}",
-            epochs,
-            epoch_range.1
-        );
-        let size = self.sync_all_shared_buffer(epoch_range).await?;
+        tracing::info!("sync epoch vec:{:?},checkpoint epoch {:?}", epochs, epoch);
+        let size = self.sync_all_shared_buffer((last_epoch, epoch)).await?;
         self.buffer_tracker
             .send_event(SharedBufferEvent::EpochSynced(epochs));
-        Ok(size)
+        Ok((size, true))
     }
 
     /// Sync all shared buffer less than or equal to epoch
@@ -572,7 +584,7 @@ impl LocalVersionManager {
                 let mut shared_buffer_guard = value.write();
                 match &task_result {
                     Ok(sst) => {
-                        let sst_info = if is_local { Some(sst.clone()) } else { None };
+                        let sst_info = if is_local { sst.clone() } else { vec![] };
                         shared_buffer_guard.succeed_upload_task(*order_index, sst_info);
                     }
                     Err(_e) => {
@@ -614,7 +626,7 @@ impl LocalVersionManager {
     pub fn get_uncommitted_ssts(&self, epoch: HummockEpoch) -> Vec<LocalSstableInfo> {
         let local_version_guard = self.local_version.read();
         if let Some(shared_buffer) = local_version_guard.get_shared_buffer(epoch) {
-            shared_buffer.read().get_ssts_to_commit();
+            shared_buffer.read().assert_ssts_to_commit();
         }
         local_version_guard.get_sync_uncommit_data(epoch)
     }

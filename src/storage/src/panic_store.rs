@@ -124,7 +124,7 @@ impl StateStore for PanicStateStore {
         }
     }
 
-    fn sync(&self, _epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
+    fn sync(&self, _epoch: HummockEpoch) -> Self::SyncFuture<'_> {
         async move {
             panic!("should not sync from the panic state store!");
         }

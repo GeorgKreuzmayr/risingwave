@@ -230,19 +230,19 @@ where
         }
     }
 
-    fn sync(&self, epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
+    fn sync(&self, epoch: HummockEpoch) -> Self::SyncFuture<'_> {
         async move {
             let timer = self.stats.shared_buffer_to_l0_duration.start_timer();
-            let size = self
+            let (size, need_sync) = self
                 .inner
-                .sync(epoch_range)
+                .sync(epoch)
                 .await
                 .inspect_err(|e| error!("Failed in sync: {:?}", e))?;
             timer.observe_duration();
             if size != 0 {
                 self.stats.write_l0_size_per_epoch.observe(size as _);
             }
-            Ok(size)
+            Ok((size, need_sync))
         }
     }
 

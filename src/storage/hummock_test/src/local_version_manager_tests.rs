@@ -190,7 +190,7 @@ async fn test_update_uncommitted_ssts() {
             assert_eq!(payload[0][0], UncommittedData::Batch(batches[0].clone()));
             assert_eq!(task_size, batches[0].size());
         }
-        shared_buffer_guard.succeed_upload_task(Some(task_id), None);
+        shared_buffer_guard.succeed_upload_task(Some(task_id), vec![]);
     }
     local_version_manager
         .local_version()
@@ -249,7 +249,7 @@ async fn test_update_uncommitted_ssts() {
             assert_eq!(payload[0][0], UncommittedData::Batch(batches[1].clone()));
             assert_eq!(task_size, batches[1].size());
         }
-        shared_buffer_guard.succeed_upload_task(Some(task_id), None);
+        shared_buffer_guard.succeed_upload_task(Some(task_id), vec![]);
     }
     local_version_manager
         .local_version()

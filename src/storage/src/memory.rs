@@ -239,10 +239,10 @@ impl StateStore for MemoryStateStore {
         }
     }
 
-    fn sync(&self, _epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_> {
+    fn sync(&self, _epoch: HummockEpoch) -> Self::SyncFuture<'_> {
         async move {
             // memory backend doesn't support push to S3, so this is a no-op
-            Ok(0)
+            Ok((0, true))
         }
     }
 

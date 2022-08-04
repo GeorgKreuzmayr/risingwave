@@ -30,7 +30,7 @@ pub trait ScanFutureTrait<'a, R, B> = Future<Output = StorageResult<Vec<(Bytes, 
 pub trait IterFutureTrait<'a, I: StateStoreIter<Item = (Bytes, Bytes)>, R, B> =
     Future<Output = StorageResult<I>> + Send;
 pub trait EmptyFutureTrait<'a> = Future<Output = StorageResult<()>> + Send;
-pub trait SyncFutureTrait<'a> = Future<Output = StorageResult<usize>> + Send;
+pub trait SyncFutureTrait<'a> = Future<Output = StorageResult<(usize, bool)>> + Send;
 pub trait IngestBatchFutureTrait<'a> = Future<Output = StorageResult<usize>> + Send;
 
 #[macro_export]
@@ -193,7 +193,7 @@ pub trait StateStore: Send + Sync + 'static + Clone {
     /// Syncs buffered data to S3.
     /// If the epoch is None, all buffered data will be synced.
     /// Otherwise, only data of the provided epoch will be synced.
-    fn sync(&self, epoch_range: (HummockEpoch, HummockEpoch)) -> Self::SyncFuture<'_>;
+    fn sync(&self, epoch: HummockEpoch) -> Self::SyncFuture<'_>;
 
     /// Creates a [`MonitoredStateStore`] from this state store, with given `stats`.
     fn monitored(self, stats: Arc<StateStoreMetrics>) -> MonitoredStateStore<Self> {

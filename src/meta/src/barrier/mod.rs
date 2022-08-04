@@ -210,7 +210,7 @@ pub struct GlobalBarrierManager<S: MetaStore> {
 
     env: MetaSrvEnv<S>,
 
-    sync_queue: Arc<RwLock<Vec<PostCheckpoint<S>>>>,
+    sync_queue: Arc<RwLock<VecDeque<PostCheckpoint<S>>>>,
 }
 
 /// Controls the concurrent execution of commands.
@@ -494,7 +494,7 @@ where
             metrics,
             env,
             in_flight_barrier_nums,
-            sync_queue: Arc::new(RwLock::new(vec![])),
+            sync_queue: Arc::new(RwLock::new(VecDeque::default())),
         }
     }
 
@@ -680,7 +680,7 @@ where
                         barrier: Some(barrier),
                         actor_ids_to_send,
                         actor_ids_to_collect,
-                        is_sync: true,
+                        need_sync: true,
                     };
                     tracing::trace!(
                         target: "events::meta::barrier::inject_barrier",
@@ -847,15 +847,16 @@ where
                     .iter()
                     .flat_map(|r| r.create_mview_progress.clone())
                     .collect_vec();
-                self.sync_queue
-                    .write()
-                    .await
-                    .insert(0, (command_ctx, notifiers, create_mv_progress));
+                self.sync_queue.write().await.push_front((
+                    command_ctx,
+                    notifiers,
+                    create_mv_progress,
+                ));
 
                 // If not sync , we can't notify collection completion
-                if resps.iter().all(|node| node.is_sync) {
+                if resps.iter().all(|node| node.need_sync) {
                     while let Some((command_ctx, mut notifiers, create_mv_progress)) =
-                        self.sync_queue.write().await.pop()
+                        self.sync_queue.write().await.pop_back()
                     {
                         checkpoint_control.remove_changes(command_ctx.command.changes());
                         command_ctx.post_collect().await?;

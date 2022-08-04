@@ -447,7 +447,7 @@ impl SharedBuffer {
     pub fn succeed_upload_task(
         &mut self,
         order_index: Option<OrderIndex>,
-        new_sst: Option<Vec<LocalSstableInfo>>,
+        new_sst: Vec<LocalSstableInfo>,
     ) -> Vec<LocalSstableInfo> {
         let order_index = order_index.unwrap_or(0);
         let (payload, task_write_batch_size) = self
@@ -461,21 +461,20 @@ impl SharedBuffer {
             });
         self.global_upload_task_size
             .fetch_sub(task_write_batch_size, Relaxed);
-        if let Some(new_sst) = new_sst {
-            for sst in new_sst {
-                let data = UncommittedData::Sst(sst);
-                let insert_result = self
-                    .uncommitted_data
-                    .insert((data.end_user_key().to_vec(), order_index), data);
-                assert!(
-                    insert_result.is_none(),
-                    "duplicate data end key and order index when inserting an SST. \
-                Order index: {}. Previous data: {:?}",
-                    order_index,
-                    insert_result,
-                );
-            }
+        for sst in new_sst {
+            let data = UncommittedData::Sst(sst);
+            let insert_result = self
+                .uncommitted_data
+                .insert((data.end_user_key().to_vec(), order_index), data);
+            assert!(
+                insert_result.is_none(),
+                "duplicate data end key and order index when inserting an SST. \
+            Order index: {}. Previous data: {:?}",
+                order_index,
+                insert_result,
+            );
         }
+
         let mut previous_sst = Vec::new();
         for data in payload.into_values() {
             match data {
@@ -491,7 +490,7 @@ impl SharedBuffer {
         previous_sst
     }
 
-    pub fn get_ssts_to_commit(&self) {
+    pub fn assert_ssts_to_commit(&self) {
         assert!(
             self.uploading_tasks.is_empty(),
             "when committing sst there should not be uploading task"
@@ -695,10 +694,7 @@ mod tests {
         let sst1 = gen_dummy_sst_info(1, vec![batch1, batch2]);
         shared_buffer.borrow_mut().succeed_upload_task(
             Some(order_index1),
-            Some(vec![(
-                StaticCompactionGroupId::StateDefault.into(),
-                sst1.clone(),
-            )]),
+            vec![(StaticCompactionGroupId::StateDefault.into(), sst1.clone())],
         );
 
         shared_buffer

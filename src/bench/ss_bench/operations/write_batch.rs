@@ -198,7 +198,7 @@ impl Operations {
                         .unwrap();
                     let last_batch = i + 1 == l;
                     if ctx.epoch_barrier_finish(last_batch) {
-                        store.sync((epoch-1,epoch)).await.unwrap();
+                        store.sync(epoch).await.unwrap();
                         let synced_sst = store.get_uncommitted_ssts(epoch);
                         ctx.meta_client
                             .commit_epoch(epoch, synced_sst)

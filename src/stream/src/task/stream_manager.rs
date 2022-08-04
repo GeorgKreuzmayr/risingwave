@@ -15,7 +15,6 @@
 use core::time::Duration;
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -75,7 +74,6 @@ pub struct LocalStreamManagerCore {
 /// `LocalStreamManager` manages all stream executors in this project.
 pub struct LocalStreamManager {
     core: Mutex<LocalStreamManagerCore>,
-    max_sync_epoch: AtomicU64,
 }
 
 pub struct ExecutorParams {
@@ -129,7 +127,6 @@ impl LocalStreamManager {
     fn with_core(core: LocalStreamManagerCore) -> Self {
         Self {
             core: Mutex::new(core),
-            max_sync_epoch: AtomicU64::new(0),
         }
     }
 
@@ -196,22 +193,6 @@ impl LocalStreamManager {
     }
 
     pub async fn sync_epoch(&self, epoch: u64) -> (Vec<LocalSstableInfo>, bool) {
-        let last_epoch;
-        loop {
-            let max_sync_epoch = self.max_sync_epoch.load(Ordering::Relaxed);
-            if epoch <= max_sync_epoch {
-                tracing::info!("sync no {:?},{:?}", epoch, max_sync_epoch);
-                return (vec![], false);
-            }
-            if self
-                .max_sync_epoch
-                .compare_exchange(max_sync_epoch, epoch, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                last_epoch = max_sync_epoch;
-                break;
-            }
-        }
         let timer = self
             .core
             .lock()
@@ -219,8 +200,9 @@ impl LocalStreamManager {
             .barrier_sync_latency
             .start_timer();
         let local_sst_info = dispatch_state_store!(self.state_store(), store, {
-            match store.sync((last_epoch, epoch)).await {
-                Ok(_) => store.get_uncommitted_ssts(epoch),
+            match store.sync(epoch).await {
+                Ok((_, true)) => (store.get_uncommitted_ssts(epoch), true),
+                Ok((_, false)) => (vec![], false),
                 // TODO: Handle sync failure by propagating it back to global barrier manager
                 Err(e) => panic!(
                     "Failed to sync state store after receiving barrier prev_epoch {:?} due to {}",
@@ -229,7 +211,7 @@ impl LocalStreamManager {
             }
         });
         timer.observe_duration();
-        (local_sst_info, true)
+        local_sst_info
     }
 
     pub async fn clear_storage_buffer(&self) {
