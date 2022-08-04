@@ -515,9 +515,6 @@ impl LocalVersionManager {
     /// Sync all shared buffer less than or equal to epoch
     pub async fn sync_all_shared_buffer(&self, epoch_range: (u64, u64)) -> HummockResult<usize> {
         let epoch = epoch_range.1;
-        // self.local_version
-        //     .write()
-        //     .new_shared_buffer(epoch, self.buffer_tracker.global_upload_task_size.clone());
         let mut order_index_map = HashMap::default();
         let mut task_write_batch_size = 0;
         let mut all_order_sort_uncommit_data = vec![];

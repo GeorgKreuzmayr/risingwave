@@ -498,7 +498,8 @@ impl SharedBuffer {
         );
         assert!(
             self.uncommitted_data.is_empty(),
-            "when committing sst there should not be uncommitted_data in shared buffer"
+            "when committing sst there should not be uncommitted_data in shared buffer {:?}",
+            self.uncommitted_data,
         );
     }
 

@@ -871,7 +871,6 @@ async fn test_write_anytime() {
 
     hummock_storage.sync((epoch2 - 1, epoch2)).await.unwrap();
     assert_new_value(epoch1).await;
-    println!("=========");
     assert_old_value(epoch2).await;
 
     assert!(!hummock_storage.get_uncommitted_ssts(epoch1).is_empty());
@@ -957,4 +956,235 @@ async fn test_delete_get() {
         .await
         .unwrap()
         .is_none());
+}
+#[tokio::test]
+async fn test_range_sync() {
+    let sstable_store = mock_sstable_store();
+    let hummock_options = Arc::new(default_config_for_test());
+    let (_env, hummock_manager_ref, _cluster_manager_ref, worker_node) =
+        setup_compute_env(8080).await;
+    let hummock_meta_client = Arc::new(MockHummockMetaClient::new(
+        hummock_manager_ref.clone(),
+        worker_node.id,
+    ));
+
+    let hummock_storage = HummockStorage::with_default_stats(
+        hummock_options,
+        sstable_store.clone(),
+        hummock_meta_client.clone(),
+        Arc::new(StateStoreMetrics::unused()),
+        Arc::new(DummyCompactionGroupClient::new(
+            StaticCompactionGroupId::StateDefault.into(),
+        )),
+    )
+    .await
+    .unwrap();
+
+    let initial_epoch = hummock_storage
+        .local_version_manager()
+        .get_pinned_version()
+        .max_committed_epoch();
+    let epoch1 = initial_epoch + 1;
+    let batch1 = vec![
+        (Bytes::from("aa"), StorageValue::new_default_put("111")),
+        (Bytes::from("bb"), StorageValue::new_default_put("111")),
+        (Bytes::from("cc"), StorageValue::new_default_put("111")),
+    ];
+    let batch2 = vec![(Bytes::from("dd"), StorageValue::new_default_put("123"))];
+    let batch3 = vec![
+        (Bytes::from("aa"), StorageValue::new_default_put("222")),
+        (Bytes::from("bb"), StorageValue::new_default_put("222")),
+        (Bytes::from("cc"), StorageValue::new_default_put("222")),
+    ];
+    hummock_storage
+        .ingest_batch(
+            batch1,
+            WriteOptions {
+                epoch: epoch1,
+                table_id: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let epoch2 = initial_epoch + 2;
+    hummock_storage
+        .ingest_batch(
+            batch2,
+            WriteOptions {
+                epoch: epoch2,
+                table_id: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    let epoch3 = initial_epoch + 3;
+
+    hummock_storage
+        .ingest_batch(
+            batch3,
+            WriteOptions {
+                epoch: epoch3,
+                table_id: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+
+    hummock_storage.sync((initial_epoch, epoch3)).await.unwrap();
+    let ssts = hummock_storage.get_uncommitted_ssts(epoch3);
+
+    assert_eq!(
+        hummock_storage
+            .get(
+                "bb".as_bytes(),
+                ReadOptions {
+                    epoch: epoch1,
+                    table_id: Default::default(),
+                    ttl: None,
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        "111"
+    );
+    assert_eq!(
+        hummock_storage
+            .get(
+                "bb".as_bytes(),
+                ReadOptions {
+                    epoch: epoch2,
+                    table_id: Default::default(),
+                    ttl: None,
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        "111"
+    );
+    assert_eq!(
+        hummock_storage
+            .get(
+                "dd".as_bytes(),
+                ReadOptions {
+                    epoch: epoch2,
+                    table_id: Default::default(),
+                    ttl: None,
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        "123"
+    );
+    assert_eq!(
+        hummock_storage
+            .get(
+                "bb".as_bytes(),
+                ReadOptions {
+                    epoch: epoch3,
+                    table_id: Default::default(),
+                    ttl: None,
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        "222"
+    );
+    let mut iter = hummock_storage
+        .iter(
+            None,
+            "aa".as_bytes()..="cc".as_bytes(),
+            ReadOptions {
+                epoch: epoch1,
+                table_id: Default::default(),
+                ttl: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (Bytes::from("aa"), Bytes::from("111")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("bb"), Bytes::from("111")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("cc"), Bytes::from("111")),
+        iter.next().await.unwrap().unwrap()
+    );
+    let mut iter = hummock_storage
+        .iter(
+            None,
+            "aa".as_bytes()..="cc".as_bytes(),
+            ReadOptions {
+                epoch: epoch3,
+                table_id: Default::default(),
+                ttl: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (Bytes::from("aa"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("bb"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("cc"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
+
+    hummock_meta_client
+        .commit_epoch(epoch3, ssts)
+        .await
+        .unwrap();
+    hummock_storage.wait_epoch(epoch3).await.unwrap();
+
+    assert_eq!(
+        hummock_storage
+            .get(
+                "bb".as_bytes(),
+                ReadOptions {
+                    epoch: epoch3,
+                    table_id: Default::default(),
+                    ttl: None,
+                }
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+        "222"
+    );
+    let mut iter = hummock_storage
+        .iter(
+            None,
+            "aa".as_bytes()..="cc".as_bytes(),
+            ReadOptions {
+                epoch: epoch3,
+                table_id: Default::default(),
+                ttl: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        (Bytes::from("aa"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("bb"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
+    assert_eq!(
+        (Bytes::from("cc"), Bytes::from("222")),
+        iter.next().await.unwrap().unwrap()
+    );
 }
