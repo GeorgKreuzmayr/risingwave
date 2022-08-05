@@ -536,7 +536,7 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test(flavor = "multi_thread")]
+    #[tokio::test]
     async fn test_leader_lease() {
         let info = AddressInfo {
             addr: "node1".to_string(),
