@@ -209,8 +209,25 @@ pub struct GlobalBarrierManager<S: MetaStore> {
     metrics: Arc<MetaMetrics>,
 
     env: MetaSrvEnv<S>,
+}
 
-    sync_queue: Arc<RwLock<VecDeque<PostCheckpoint<S>>>>,
+struct UncommittedStates<S: MetaStore> {
+    uncommitted_queue: VecDeque<PostCheckpoint<S>>,
+    uncommitted_ssts: Vec<LocalSstableInfo>,
+    uncommitted_work_id: HashMap<HummockSstableId, WorkerId>,
+}
+
+impl<S> Default for UncommittedStates<S>
+where
+    S: MetaStore,
+{
+    fn default() -> Self {
+        Self {
+            uncommitted_queue: Default::default(),
+            uncommitted_ssts: Default::default(),
+            uncommitted_work_id: Default::default(),
+        }
+    }
 }
 
 /// Controls the concurrent execution of commands.
@@ -232,6 +249,8 @@ struct CheckpointControl<S: MetaStore> {
     removing_actors: HashSet<ActorId>,
 
     metrics: Arc<MetaMetrics>,
+
+    uncommitted_states: UncommittedStates<S>,
 }
 
 impl<S> CheckpointControl<S>
@@ -246,7 +265,37 @@ where
             adding_actors: Default::default(),
             removing_actors: Default::default(),
             metrics,
+            uncommitted_states: Default::default(),
         }
+    }
+
+    fn add_uncommitted_states(
+        &mut self,
+        resps: &Vec<BarrierCompleteResponse>,
+        post_checkpoint: PostCheckpoint<S>,
+    ) {
+        for resp in resps {
+            let mut t: Vec<LocalSstableInfo> = resp
+                .synced_sstables
+                .iter()
+                .cloned()
+                .map(|grouped| {
+                    let sst = grouped.sst.expect("field not None");
+                    self.uncommitted_states
+                        .uncommitted_work_id
+                        .insert(sst.id, resp.worker_id);
+                    (grouped.compaction_group_id, sst)
+                })
+                .collect_vec();
+            self.uncommitted_states.uncommitted_ssts.append(&mut t);
+        }
+        self.uncommitted_states
+            .uncommitted_queue
+            .push_front(post_checkpoint);
+    }
+
+    fn get_uncommitted_states(&mut self) -> UncommittedStates<S> {
+        take(&mut self.uncommitted_states)
     }
 
     /// Before resolving the actors to be sent or collected, we should first record the newly
@@ -494,7 +543,6 @@ where
             metrics,
             env,
             in_flight_barrier_nums,
-            sync_queue: Arc::new(RwLock::new(VecDeque::default())),
         }
     }
 
@@ -814,49 +862,31 @@ where
                 // because the storage engine will query from new to old in the order in which
                 // the L0 layer files are generated.
                 // See https://github.com/singularity-data/risingwave/issues/1251
-                let mut sst_to_worker: HashMap<HummockSstableId, WorkerId> = HashMap::new();
-                let mut synced_ssts: Vec<LocalSstableInfo> = vec![];
-                for resp in resps {
-                    let mut t: Vec<LocalSstableInfo> = resp
-                        .synced_sstables
-                        .iter()
-                        .cloned()
-                        .map(|grouped| {
-                            let sst = grouped.sst.expect("field not None");
-                            sst_to_worker.insert(sst.id, resp.worker_id);
-                            (grouped.compaction_group_id, sst)
-                        })
-                        .collect_vec();
-                    synced_ssts.append(&mut t);
-                }
-
-                if prev_epoch == INVALID_EPOCH {
-                    assert!(
-                        synced_ssts.is_empty(),
-                        "no sstables should be produced in the first epoch"
-                    );
-                } else {
-                    self.hummock_manager
-                        .commit_epoch(prev_epoch, synced_ssts, sst_to_worker)
-                        .await?;
-                }
                 node.timer.take().unwrap().observe_duration();
+
                 let notifiers = take(&mut node.notifiers);
                 let command_ctx = node.command_ctx.clone();
                 let create_mv_progress = resps
                     .iter()
                     .flat_map(|r| r.create_mview_progress.clone())
                     .collect_vec();
-                self.sync_queue.write().await.push_front((
-                    command_ctx,
-                    notifiers,
-                    create_mv_progress,
-                ));
+                checkpoint_control.add_uncommitted_states(
+                    resps,
+                    (command_ctx, notifiers, create_mv_progress),
+                );
 
                 // If not sync , we can't notify collection completion
                 if resps.iter().all(|node| node.need_sync) {
+                    let mut uncommitted_states = checkpoint_control.get_uncommitted_states();
+                    self.hummock_manager
+                        .commit_epoch(
+                            prev_epoch,
+                            uncommitted_states.uncommitted_ssts,
+                            uncommitted_states.uncommitted_work_id,
+                        )
+                        .await?;
                     while let Some((command_ctx, mut notifiers, create_mv_progress)) =
-                        self.sync_queue.write().await.pop_back()
+                        uncommitted_states.uncommitted_queue.pop_back()
                     {
                         checkpoint_control.remove_changes(command_ctx.command.changes());
                         command_ctx.post_collect().await?;
