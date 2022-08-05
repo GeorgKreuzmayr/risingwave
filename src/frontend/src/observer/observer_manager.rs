@@ -67,6 +67,9 @@ impl ObserverNodeImpl for FrontendObserverNode {
             Info::HummockSnapshot(_) => {
                 // TODO: remove snapshot notify
             }
+            Info::HummockVersionDeltas(_) => {
+                panic!("frontend node should not receive HummockVersionDeltas");
+            }
         }
     }
 
