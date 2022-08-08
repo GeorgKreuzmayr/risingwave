@@ -94,7 +94,10 @@ where
         Ok(map.values().cloned().collect())
     }
 
-    pub async fn find_table_ids_for_fragment_ids(&self, fragment_ids: HashSet<FragmentId>) -> HashMap<FragmentId, TableId> {
+    pub async fn find_table_ids_for_fragment_ids(
+        &self,
+        fragment_ids: HashSet<FragmentId>,
+    ) -> HashMap<FragmentId, TableId> {
         let mut result = HashMap::new();
 
         let map = &self.core.read().await.table_fragments;

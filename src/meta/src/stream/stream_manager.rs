@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-
 use itertools::Itertools;
 use risingwave_common::bail;
 use risingwave_common::catalog::TableId;
@@ -25,12 +24,8 @@ use risingwave_pb::catalog::{Source, Table};
 use risingwave_pb::common::{ActorInfo, ParallelUnitMapping, WorkerType};
 use risingwave_pb::meta::table_fragments::fragment::FragmentDistributionType;
 use risingwave_pb::meta::table_fragments::{ActorState, ActorStatus};
-
 use risingwave_pb::stream_plan::stream_node::NodeBody;
-
-use risingwave_pb::stream_plan::{
-    ActorMapping, Dispatcher, DispatcherType, StreamNode,
-};
+use risingwave_pb::stream_plan::{ActorMapping, Dispatcher, DispatcherType, StreamNode};
 use risingwave_pb::stream_service::{
     BroadcastActorInfoTableRequest, BuildActorsRequest, HangingChannel, UpdateActorsRequest,
 };
