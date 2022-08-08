@@ -23,7 +23,7 @@ use tonic::{Request, Response, Status};
 use crate::error::meta_error_to_tonic;
 use crate::hummock::compaction::ManualCompactionOption;
 use crate::hummock::compaction_group::manager::CompactionGroupManagerRef;
-use crate::hummock::{CompactorManagerRef, HummockManagerRef, VacuumTrigger};
+use crate::hummock::{CompactorManagerRef, HummockManagerRef, VacuumManager};
 use crate::rpc::service::RwReceiverStream;
 use crate::storage::MetaStore;
 use crate::stream::FragmentManagerRef;
@@ -34,7 +34,7 @@ where
 {
     hummock_manager: HummockManagerRef<S>,
     compactor_manager: CompactorManagerRef,
-    vacuum_trigger: Arc<VacuumTrigger<S>>,
+    vacuum_manager: Arc<VacuumManager<S>>,
     compaction_group_manager: CompactionGroupManagerRef<S>,
     fragment_manager: FragmentManagerRef<S>,
 }
@@ -46,14 +46,14 @@ where
     pub fn new(
         hummock_manager: HummockManagerRef<S>,
         compactor_manager: CompactorManagerRef,
-        vacuum_trigger: Arc<VacuumTrigger<S>>,
+        vacuum_trigger: Arc<VacuumManager<S>>,
         compaction_group_manager: CompactionGroupManagerRef<S>,
         fragment_manager: FragmentManagerRef<S>,
     ) -> Self {
         HummockServiceImpl {
             hummock_manager,
             compactor_manager,
-            vacuum_trigger,
+            vacuum_manager: vacuum_trigger,
             compaction_group_manager,
             fragment_manager,
         }
@@ -206,7 +206,7 @@ where
         request: Request<ReportVacuumTaskRequest>,
     ) -> Result<Response<ReportVacuumTaskResponse>, Status> {
         if let Some(vacuum_task) = request.into_inner().vacuum_task {
-            self.vacuum_trigger
+            self.vacuum_manager
                 .report_vacuum_task(vacuum_task)
                 .await
                 .map_err(meta_error_to_tonic)?;
@@ -302,9 +302,22 @@ where
         &self,
         request: Request<ReportFullScanTaskRequest>,
     ) -> Result<Response<ReportFullScanTaskResponse>, Status> {
-        self.hummock_manager
-            .extend_ssts_to_delete_from_scan(&request.into_inner().sst_ids)
-            .await;
+        let vacuum_manager = self.vacuum_manager.clone();
+        // The following operation takes some time, so we do it in dedicated task and responds the
+        // RPC immediately.
+        tokio::spawn(async move {
+            match vacuum_manager
+                .complete_full_gc(request.into_inner().sst_ids)
+                .await
+            {
+                Ok(number) => {
+                    tracing::info!("Full GC results {} SSTs to delete", number);
+                }
+                Err(e) => {
+                    tracing::warn!("Full GC SST failed: {:#?}", e);
+                }
+            }
+        });
         Ok(Response::new(ReportFullScanTaskResponse { status: None }))
     }
 }

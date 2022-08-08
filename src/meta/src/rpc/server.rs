@@ -407,7 +407,7 @@ pub async fn rpc_serve_with_store<S: MetaStore>(
         hummock_manager.clone(),
         compactor_manager.clone(),
     ));
-    let vacuum_trigger = Arc::new(hummock::VacuumTrigger::new(
+    let vacuum_trigger = Arc::new(hummock::VacuumManager::new(
         hummock_manager.clone(),
         compactor_manager.clone(),
     ));

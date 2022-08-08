@@ -956,10 +956,12 @@ where
         new_hummock_version.id = new_version_id;
         new_version_delta.id = new_version_id;
         if epoch <= new_hummock_version.max_committed_epoch {
-            return Err(Error::InternalError(format!(
+            return Err(anyhow::anyhow!(
                 "Epoch {} <= max_committed_epoch {}",
-                epoch, new_hummock_version.max_committed_epoch
-            )));
+                epoch,
+                new_hummock_version.max_committed_epoch
+            )
+            .into());
         }
 
         let mut modified_compaction_groups = vec![];
@@ -1194,10 +1196,11 @@ where
         let compactor = match compactor {
             None => {
                 tracing::warn!("trigger_manual_compaction No compactor is available.");
-                return Err(Error::InternalError(format!(
+                return Err(anyhow::anyhow!(
                     "trigger_manual_compaction No compactor is available. compaction_group {}",
                     compaction_group
-                )));
+                )
+                .into());
             }
 
             Some(compactor) => compactor,
@@ -1211,17 +1214,19 @@ where
             Ok(Some(compact_task)) => compact_task,
             Ok(None) => {
                 // No compaction task available.
-                return Err(Error::InternalError(format!(
+                return Err(anyhow::anyhow!(
                     "trigger_manual_compaction No compaction_task is available. compaction_group {}",
                     compaction_group
-                )));
+                ).into());
             }
             Err(err) => {
                 tracing::warn!("Failed to get compaction task: {:#?}.", err);
-                return Err(Error::InternalError(format!(
+                return Err(anyhow::anyhow!(
                     "Failed to get compaction task: {:#?} compaction_group {}",
-                    err, compaction_group
-                )));
+                    err,
+                    compaction_group
+                )
+                .into());
             }
         };
 
@@ -1283,5 +1288,9 @@ where
 
     pub fn compaction_group_manager_ref_for_test(&self) -> CompactionGroupManagerRef<S> {
         self.compaction_group_manager.clone()
+    }
+
+    pub fn cluster_manager(&self) -> &ClusterManagerRef<S> {
+        &self.cluster_manager
     }
 }
