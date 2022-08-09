@@ -190,7 +190,7 @@ message SubscribeResponse {
     user.UserInfo user = 11;
     MetaSnapshot snapshot = 9;
     hummock.HummockSnapshot hummock_snapshot = 10;
-    hummock.HummockVersionDeltas hummock_version_deltas = 13;
+    hummock.HummockVersionDeltas hummock_version_deltas = 14;
   }
 }
 
