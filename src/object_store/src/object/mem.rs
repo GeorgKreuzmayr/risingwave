@@ -23,7 +23,7 @@ use itertools::Itertools;
 use tokio::sync::Mutex;
 
 use super::{ObjectError, ObjectResult};
-use crate::object::{BlockLocation, ObjectMetadata, ObjectStore};
+use crate::object::{BlockLocation, ObjectMetadata, ObjectStore, StoreMediaTypeE};
 
 /// In-memory object storage, useful for testing.
 #[derive(Default, Clone)]
@@ -107,6 +107,10 @@ impl ObjectStore for InMemObjectStore {
             })
             .sorted_by(|a, b| Ord::cmp(&a.key, &b.key))
             .collect_vec())
+    }
+
+    fn store_media_type(&self) -> StoreMediaTypeE {
+        StoreMediaTypeE::Mem
     }
 }
 

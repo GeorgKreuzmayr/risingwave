@@ -18,7 +18,7 @@ use futures::future::try_join_all;
 use itertools::Itertools;
 
 use super::{BlockLocation, ObjectError, ObjectMetadata};
-use crate::object::{Bytes, ObjectResult, ObjectStore};
+use crate::object::{Bytes, ObjectResult, ObjectStore, StoreMediaTypeE};
 
 /// Object store with S3 backend
 pub struct S3ObjectStore {
@@ -157,6 +157,10 @@ impl ObjectStore for S3ObjectStore {
             }
         }
         Ok(ret)
+    }
+
+    fn store_media_type(&self) -> StoreMediaTypeE {
+        StoreMediaTypeE::S3
     }
 }
 

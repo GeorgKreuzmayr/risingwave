@@ -25,7 +25,9 @@ use futures::future::try_join_all;
 use risingwave_common::cache::{CachableEntry, LruCache};
 use tokio::io::AsyncWriteExt;
 
-use crate::object::{BlockLocation, ObjectError, ObjectMetadata, ObjectResult, ObjectStore};
+use crate::object::{
+    BlockLocation, ObjectError, ObjectMetadata, ObjectResult, ObjectStore, StoreMediaTypeE,
+};
 
 pub(super) mod utils {
     use std::fs::Metadata;
@@ -326,6 +328,10 @@ impl ObjectStore for DiskObjectStore {
         }
         list_result.sort_by(|a, b| Ord::cmp(&a.key, &b.key));
         Ok(list_result)
+    }
+
+    fn store_media_type(&self) -> StoreMediaTypeE {
+        StoreMediaTypeE::Disk
     }
 }
 
