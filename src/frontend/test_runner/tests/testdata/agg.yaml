@@ -674,10 +674,9 @@
     create table t(a int, b int, c int);
     select a, count(distinct b), sum(c) filter(where b < 100) from t group by a;
   optimized_logical_plan: |
-    LogicalAgg { group_key: [t.a], aggs: [count(t.b) filter((flag = 1:Int64)), sum(sum(t.c) filter((t.b < 100:Int32))) filter((flag = 0:Int64))] }
-      LogicalAgg { group_key: [t.a, t.b, flag], aggs: [sum(t.c) filter((t.b < 100:Int32))] }
-        LogicalExpand { column_subsets: [[t.a, t.b, t.c], [t.a, t.b]] }
-          LogicalScan { table: t, columns: [t.a, t.b, t.c] }
+    LogicalAgg { group_key: [t.a], aggs: [count(t.b), sum(sum(t.c) filter((t.b < 100:Int32)))] }
+      LogicalAgg { group_key: [t.a, t.b], aggs: [sum(t.c) filter((t.b < 100:Int32))] }
+        LogicalScan { table: t, columns: [t.a, t.b, t.c] }
 - sql: |
     /* combined order by & filter clauses */
     create table t(a varchar, b int);
@@ -709,11 +708,28 @@
     select single_value(distinct x) from t;
   binder_error: 'Invalid input syntax: single_value(distinct) is disallowed'
 - sql: |
-    /* prune key of column_subsets */
-    create table t(v1 int, v2 int);
-    with z(a, b) as (select count(distinct v1), count(v2) from t) select a from z;
+    /* remove unnecessary subsets of expand */
+    create table t(x int, y int);
+    select count(distinct x), sum(distinct x), min(y) from t;
   optimized_logical_plan: |
-    LogicalAgg { aggs: [count(t.v1) filter((flag = 1:Int64))] }
-      LogicalAgg { group_key: [t.v1, flag], aggs: [] }
-        LogicalExpand { column_subsets: [[], [t.v1]] }
-          LogicalScan { table: t, columns: [t.v1] }
+    LogicalAgg { aggs: [count(t.x) filter((flag = 1:Int64)), sum(t.x) filter((flag = 1:Int64)), min(min(t.y)) filter((flag = 0:Int64))] }
+      LogicalAgg { group_key: [t.x, t.x, flag], aggs: [min(t.y)] }
+        LogicalExpand { column_subsets: [[t.y], [t.x]] }
+          LogicalScan { table: t, columns: [t.x, t.y] }
+- sql: |
+    /* remove unnecessary expand */
+    create table t(x int, y int);
+    select count(distinct x), min(x) from t;
+  optimized_logical_plan: |
+    LogicalAgg { aggs: [count(t.x), min(min(t.x))] }
+      LogicalAgg { group_key: [t.x], aggs: [min(t.x)] }
+        LogicalScan { table: t, columns: [t.x] }
+- sql: |
+    /* replace subset with its superset */
+    create table t(x int, y int, z int);
+    select count(distinct x), sum(x) filter(where y > 100), min(distinct z) from t;
+  optimized_logical_plan: |
+    LogicalAgg { aggs: [count(t.x) filter((flag = 0:Int64)), sum(sum(t.x) filter((t.y > 100:Int32))) filter((flag = 0:Int64)), min(t.z) filter((flag = 1:Int64))] }
+      LogicalAgg { group_key: [t.x, t.z, flag], aggs: [sum(t.x) filter((t.y > 100:Int32))] }
+        LogicalExpand { column_subsets: [[t.x, t.y], [t.z]] }
+          LogicalScan { table: t, columns: [t.x, t.y, t.z] }
