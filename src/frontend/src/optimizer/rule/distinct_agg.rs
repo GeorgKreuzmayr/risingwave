@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::vec::IntoIter;
+
 use fixedbitset::FixedBitSet;
 use itertools::Itertools;
 use risingwave_common::types::DataType;
@@ -34,25 +36,29 @@ impl Rule for DistinctAggRule {
         // The index of `flag` in schema of `Expand`.
         let pos_of_flag = input.schema().len();
         let group_keys_len = agg_group_keys.len();
-        let (distinct_aggs, non_distinct_aggs): (Vec<_>, Vec<_>) = agg_calls
-            .clone()
-            .into_iter()
-            .partition(|agg_call| agg_call.distinct);
+        let (distinct_aggs, non_distinct_aggs): (Vec<_>, Vec<_>) =
+            agg_calls.iter().partition(|agg_call| agg_call.distinct);
         if distinct_aggs.is_empty() {
             return None;
         }
-        let flag_value_of_distinct_agg = if non_distinct_aggs.is_empty() { 0 } else { 1 };
 
-        let expand = Self::build_expand(input, &agg_group_keys, &distinct_aggs, &non_distinct_aggs);
+        let (node, flag_values, has_expand) =
+            Self::build_expand(input, &agg_group_keys, distinct_aggs, non_distinct_aggs);
 
-        let group_by_agg =
-            Self::build_middle_agg(expand, agg_group_keys, agg_calls.clone(), pos_of_flag);
+        let group_by_agg = Self::build_middle_agg(
+            node,
+            agg_group_keys,
+            agg_calls.clone(),
+            pos_of_flag,
+            has_expand,
+        );
 
         Some(Self::build_final_agg(
             group_by_agg,
             group_keys_len,
             agg_calls,
-            flag_value_of_distinct_agg,
+            flag_values.into_iter(),
+            has_expand,
         ))
     }
 }
@@ -65,12 +71,13 @@ impl DistinctAggRule {
     fn build_expand(
         input: PlanRef,
         group_keys: &[usize],
-        distinct_aggs: &[PlanAggCall],
-        non_distinct_aggs: &[PlanAggCall],
-    ) -> PlanRef {
+        distinct_aggs: Vec<&PlanAggCall>,
+        non_distinct_aggs: Vec<&PlanAggCall>,
+    ) -> (PlanRef, Vec<usize>, bool) {
         // each `subset` in `column_subsets` consists of `group_keys`, `agg_call`'s input indices
         // and the input indices of `agg_call`'s `filter`.
         let mut column_subsets = vec![];
+        let mut flag_values = vec![];
 
         if !non_distinct_aggs.is_empty() {
             column_subsets.push({
@@ -80,21 +87,44 @@ impl DistinctAggRule {
                     collect_input_ref.extend(agg_call.input_indices());
                     agg_call.filter.visit_expr(&mut collect_input_ref);
                 });
-                FixedBitSet::from(collect_input_ref).ones().collect_vec()
+                FixedBitSet::from(collect_input_ref)
             });
         }
 
         distinct_aggs.iter().for_each(|agg_call| {
-            column_subsets.push({
+            let curr = {
                 let mut collect_input_ref = CollectInputRef::with_capacity(input.schema().len());
                 collect_input_ref.extend(group_keys.to_owned());
                 collect_input_ref.extend(agg_call.input_indices());
                 agg_call.filter.visit_expr(&mut collect_input_ref);
-                FixedBitSet::from(collect_input_ref).ones().collect_vec()
-            });
+                FixedBitSet::from(collect_input_ref)
+            };
+            if let Some(i) = column_subsets
+                .iter()
+                .position(|prev| curr.is_subset(prev) || curr.is_superset(prev))
+            {
+                flag_values.push(i);
+                if curr.is_superset(&column_subsets[i]) {
+                    column_subsets[i] = curr;
+                }
+            } else {
+                flag_values.push(column_subsets.len());
+                column_subsets.push(curr);
+            }
         });
 
-        LogicalExpand::create(input, column_subsets)
+        if column_subsets.len() == 1 {
+            return (input, flag_values, false);
+        }
+        let column_subsets = column_subsets
+            .into_iter()
+            .map(|bit_set| bit_set.ones().collect_vec())
+            .collect_vec();
+        (
+            LogicalExpand::create(input, column_subsets),
+            flag_values,
+            true,
+        )
     }
 
     fn build_middle_agg(
@@ -102,6 +132,7 @@ impl DistinctAggRule {
         mut group_keys: Vec<usize>,
         agg_calls: Vec<PlanAggCall>,
         pos_of_flag: usize,
+        has_expand: bool,
     ) -> LogicalAgg {
         // The middle `LogicalAgg` groups by (`agg_group_keys` + arguments of distinct aggregates +
         // `flag`).
@@ -122,7 +153,9 @@ impl DistinctAggRule {
                 Some(agg_call)
             })
             .collect_vec();
-        group_keys.push(pos_of_flag);
+        if has_expand {
+            group_keys.push(pos_of_flag);
+        }
         LogicalAgg::new(agg_calls, group_keys, input)
     }
 
@@ -130,13 +163,14 @@ impl DistinctAggRule {
         input: LogicalAgg,
         old_group_keys_len: usize,
         mut agg_calls: Vec<PlanAggCall>,
-        mut flag_value_of_distinct_agg: i64,
+        mut flag_values: IntoIter<usize>,
+        has_expand: bool,
     ) -> PlanRef {
-        // The index of `flag` in schema of the middle `LogicalAgg`.
+        // the index of `flag` in schema of the middle `LogicalAgg`, if has `Expand`.
         let pos_of_flag = input.group_key().len() - 1;
 
         // ```ignore
-        // the input(middle agg) has the following schema:
+        // if has `Expand`, the input(middle agg) has the following schema:
         // original group columns | distinct agg arguments | flag | count_star_with_filter or non-distinct agg
         // <-                group                              -> <-             agg calls                 ->
         // ```
@@ -147,8 +181,7 @@ impl DistinctAggRule {
         let mut index_of_middle_agg = input.group_key().len();
         let mut indices_of_count = vec![];
         agg_calls.iter_mut().enumerate().for_each(|(i, agg_call)| {
-            let flag_value;
-            if agg_call.distinct {
+            let flag_value = if agg_call.distinct {
                 agg_call.distinct = false;
 
                 agg_call.inputs.iter_mut().for_each(|input_ref| {
@@ -172,8 +205,7 @@ impl DistinctAggRule {
                     agg_call.filter.conjunctions = vec![check_count.into()];
                 }
 
-                flag_value = flag_value_of_distinct_agg;
-                flag_value_of_distinct_agg += 1;
+                flag_values.next().unwrap() as i64
             } else {
                 // non-distinct agg has its corresponding middle agg.
                 agg_call.inputs = vec![InputRef::new(
@@ -206,19 +238,21 @@ impl DistinctAggRule {
 
                 // the index of non-distinct aggs' subset in `column_subsets` is always 0 if it
                 // exists.
-                flag_value = 0;
-            }
+                0
+            };
 
-            // `filter_expr` is used to pick up the rows that are really needed by aggregates.
-            let filter_expr = FunctionCall::new(
-                ExprType::Equal,
-                vec![
-                    InputRef::new(pos_of_flag, DataType::Int64).into(),
-                    Literal::new(Some(flag_value.into()), DataType::Int64).into(),
-                ],
-            )
-            .unwrap();
-            agg_call.filter.conjunctions.push(filter_expr.into());
+            if has_expand {
+                // `filter_expr` is used to pick up the rows that are really needed by aggregates.
+                let filter_expr = FunctionCall::new(
+                    ExprType::Equal,
+                    vec![
+                        InputRef::new(pos_of_flag, DataType::Int64).into(),
+                        Literal::new(Some(flag_value.into()), DataType::Int64).into(),
+                    ],
+                )
+                .unwrap();
+                agg_call.filter.conjunctions.push(filter_expr.into());
+            }
         });
 
         let mut plan: PlanRef = LogicalAgg::new(
