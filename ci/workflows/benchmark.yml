@@ -1,15 +1,8 @@
-hook: &hook
-  pre-exit: |
-    echo "Clean up"
-    rwc t delete -tenant ${tenantname}
-    echo "Step finished!"
-
 steps:
   - label: "single node benchmark"
     command: "ci/scripts/single-node-benchmark.sh"
     plugins:
-      - ./ci/plugins/common-env
-      - improbable-eng/metahook: *hook
+      - ./ci/plugins/benchmark
       - seek-oss/aws-sm#v2.3.1:
           env:
             GITHUB_TOKEN: github-token
