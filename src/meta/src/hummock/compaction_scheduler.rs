@@ -169,7 +169,6 @@ where
                 }
                 Some(compactor) => compactor,
             };
-            // TODO: skip busy compactor
 
             // 2.2 Assign the compaction task.
             match self

@@ -13,12 +13,14 @@
 // limitations under the License.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rand::Rng;
 use risingwave_hummock_sdk::HummockContextId;
 use risingwave_pb::hummock::subscribe_compact_tasks_response::Task;
 use risingwave_pb::hummock::SubscribeCompactTasksResponse;
 use tokio::sync::mpsc::{Receiver, Sender};
+use crate::hummock::rate_limiter::RateLimiter;
 
 use crate::MetaResult;
 
@@ -31,11 +33,14 @@ pub type CompactorManagerRef = Arc<CompactorManager>;
 pub struct Compactor {
     context_id: HummockContextId,
     sender: Sender<MetaResult<SubscribeCompactTasksResponse>>,
+    rate_limiter: Option<RateLimiter>,
 }
 
 impl Compactor {
     pub async fn send_task(&self, task: Task) -> MetaResult<()> {
-        // TODO: compactor node backpressure
+        if let Some(rate_limiter) = self.rate_limiter.as_ref() {
+            rate_limiter.remove_token(2).await;
+        }
         self.sender
             .send(Ok(SubscribeCompactTasksResponse { task: Some(task) }))
             .await
@@ -124,6 +129,7 @@ impl CompactorManager {
         guard.compactors.push(Arc::new(Compactor {
             context_id,
             sender: tx,
+            rate_limiter: Some(RateLimiter::new(1, Duration::from_millis(500)))
         }));
         tracing::info!("Added compactor session {}", context_id);
         rx
