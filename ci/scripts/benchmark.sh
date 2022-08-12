@@ -24,12 +24,28 @@ set -euo pipefail
 #./scripts/build.sh
 #./scripts/launch.sh
 
+while getopts 's:' opt; do
+    case ${opt} in
+        s )
+            SKU=$OPTARG
+            ;;
+        \? )
+            echo "Invalid Option: -$OPTARG" 1>&2
+            exit 1
+            ;;
+        : )
+            echo "Invalid option: $OPTARG requires an argument" 1>&2
+            ;;
+    esac
+done
+shift $((OPTIND -1))
+
 function polling() {
     set +e
     try_times=30
     while :; do
         if [ $try_times == 0 ]; then
-            echo "❌ ERROR: polling timeout"
+            echo "❌ ERROR: Polling Timeout"
             exit 1
         fi
         psql "$@" -c '\q'
@@ -53,43 +69,39 @@ trap cleanup EXIT
 date=$(date '+%Y%m%d-%H%M%S')
 TENANT_NAME="bench-${date}"
 
-echo "--- Echo info"
-echo "tenant-name: ${TENANT_NAME}"
-echo "host-ip: ${HOST_IP}"
+echo "--- Echo Info"
+echo "Tenant-Name: ${TENANT_NAME}"
+echo "Host-Ip: ${HOST_IP}"
 
-mkdir ~/risingwave-deploy
-
-echo "--- Generate RiseDev CI config"
-cp ci/risedev-components.ci.benchmark.env risedev-components.user.env
-
-echo "--- Download necessary tools"
+echo "--- Download Necessary Tools"
 apt-get -y install golang-go librdkafka-dev
 curl -L https://rwc-cli-internal-release.s3.ap-southeast-1.amazonaws.com/download.sh | bash && mv rwc /usr/local/bin
 
-echo "--- RWC config and login"
+echo "--- RWC Config and Login"
 rwc config -region ap-southeast-1
 rwc config ls
 rwc login -account benchmark -password "$BENCH_TOKEN"
 
-echo "--- RWC create a risingwave instance"
-rwc t create -tenant ${TENANT_NAME} -sku SingleNodeBench
+echo "--- RWC Create a Risingwave Instance"
+rwc t create -tenant ${TENANT_NAME} -sku ${SKU}
 
 sleep 2
 
-echo "--- Wait risingwave instance ready "
+echo "--- Wait Risingwave Instance Ready "
 endpoint=$(rwc t get-endpoint -tenant ${TENANT_NAME})
 polling ${endpoint}
 
-echo "--- Generate tpch bech args"
+echo "--- Generate Tpch-Bech Args"
+mkdir ~/risingwave-deploy
 echo "--frontend-url ${endpoint}" > ~/risingwave-deploy/tpch-bench-args-frontend
 echo "--kafka-addr ${HOST_IP}:29092" >  ~/risingwave-deploy/tpch-bench-args-kafka
 cat ~/risingwave-deploy/tpch-bench-args-frontend
 cat ~/risingwave-deploy/tpch-bench-args-kafka
 
-echo "--- Clone tpch-bench repo"
+echo "--- Clone Tpch-Bench Repo"
 git clone https://"$GITHUB_TOKEN"@github.com/singularity-data/tpch-bench.git
 
-echo "--- Run tpc-h bench"
+echo "--- Run Tpch-Bench"
 cd tpch-bench/
 ./scripts/build.sh
 ./scripts/launch_risedev_bench.sh
