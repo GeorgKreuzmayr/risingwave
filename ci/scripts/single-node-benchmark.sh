@@ -89,6 +89,8 @@ echo "--kafka-addr ${HOST_IP}:29092" >  ~/risingwave-deploy/tpch-bench-args-kafk
 cat ~/risingwave-deploy/tpch-bench-args-frontend
 cat ~/risingwave-deploy/tpch-bench-args-kafka
 
+exit 1
+
 echo "--- Clone tpch-bench repo"
 git clone https://"$GITHUB_TOKEN"@github.com/singularity-data/tpch-bench.git
 
