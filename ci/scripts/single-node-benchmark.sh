@@ -44,11 +44,8 @@ function polling() {
     set -euo pipefail
 }
 
-date=$(date '+%Y%m%d-%H%M%S')
-tenantname="bench-${date}"
-
 echo "--- echo info"
-echo ${tenantname}
+echo ${TENANT_NAME}
 echo ${HOST_IP}
 psql --version
 
@@ -71,12 +68,12 @@ echo "--- rwc login -account"
 rwc login -account benchmark -password "$BENCH_TOKEN"
 
 echo "--- rwc create a sing node risingwave instance"
-rwc t create -tenant ${tenantname} -sku SingleNodeBench
+rwc t create -tenant ${TENANT_NAME} -sku SingleNodeBench
 
 sleep 2
 
 echo "--- wait instance ready "
-endpoint=$(rwc t get-endpoint -tenant ${tenantname})
+endpoint=$(rwc t get-endpoint -tenant ${TENANT_NAME})
 polling ${endpoint}
 
 echo "--- rwc get endpoint"
