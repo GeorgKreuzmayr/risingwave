@@ -85,7 +85,6 @@ async fn build_table(sstable_id: u64, range: Range<u64>, epoch: u64) -> (Bytes, 
         bloom_false_positive: 0.01,
         compression_algorithm: CompressionAlgorithm::None,
         estimate_bloom_filter_capacity: 1024 * 1024,
-        enable_sst_streaming_upload: false,
     };
     let sstable_writer = sst_writer_builder_for_batch_upload(&opt)
         .build(sstable_id)
@@ -199,7 +198,6 @@ async fn compact<I: HummockIterator<Direction = Forward>>(iter: I, sstable_store
         bloom_false_positive: 0.01,
         compression_algorithm: CompressionAlgorithm::None,
         estimate_bloom_filter_capacity: 1024 * 1024,
-        enable_sst_streaming_upload: false,
     };
     let (writer_builder, builder_sealer) =
         sst_writer_builder_and_sealer_for_batch_upload(&opt, sstable_store, CachePolicy::NotFill);

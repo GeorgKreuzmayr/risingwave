@@ -740,7 +740,7 @@ impl Compactor {
             &self.context.stats.compact_sst_duration
         };
 
-        let sealed_builders = if options.enable_sst_streaming_upload {
+        let sealed_builders = if self.context.options.enable_sst_streaming_upload {
             let (writer_builder, builder_sealer) = get_sst_writer_and_sealer_for_streaming_upload(
                 self.context.sstable_store.clone(),
                 cache_policy,
