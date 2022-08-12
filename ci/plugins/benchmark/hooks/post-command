@@ -1,7 +1,0 @@
-#!/bin/bash
-
-set -euo pipefail
-
-echo "Clean up"
-rwc t delete -tenant ${TENANT_NAME}
-echo "Step finished!"

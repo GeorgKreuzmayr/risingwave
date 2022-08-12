@@ -44,6 +44,13 @@ function polling() {
     set -euo pipefail
 }
 
+function cleanup {
+  echo "--- delete tenant"
+  rwc t delete -tenant ${TENANT_NAME}
+}
+
+trap cleanup EXIT
+
 echo "--- echo info"
 echo ${TENANT_NAME}
 echo ${HOST_IP}
