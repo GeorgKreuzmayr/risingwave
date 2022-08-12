@@ -2,10 +2,4 @@
 
 set -euo pipefail
 
-date=$(date '+%Y%m%d-%H%M%S')
-tenantname="bench-${date}"
-
-export TENANT_NAME=${tenantname}
 export HOST_IP=$(dig +short myip.opendns.com @resolver1.opendns.com)
-
-curl -L https://rwc-cli-internal-release.s3.ap-southeast-1.amazonaws.com/download.sh | bash && sudo mv rwc /usr/local/bin

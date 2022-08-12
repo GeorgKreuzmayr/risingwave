@@ -28,7 +28,6 @@ function polling() {
     set +e
     try_times=30
     while :; do
-        echo "tenant end: $@"
         if [ $try_times == 0 ]; then
             echo "❌ ERROR: polling timeout"
             exit 1
@@ -45,16 +44,18 @@ function polling() {
 }
 
 function cleanup {
-  echo "--- delete tenant"
+  echo "--- Delete tenant"
   rwc t delete -tenant ${TENANT_NAME}
 }
 
 trap cleanup EXIT
 
-echo "--- echo info"
-echo ${TENANT_NAME}
-echo ${HOST_IP}
-psql --version
+date=$(date '+%Y%m%d-%H%M%S')
+TENANT_NAME="bench-${date}"
+
+echo "--- Echo info"
+echo "tenant-name: ${TENANT_NAME}"
+echo "host-ip: ${HOST_IP}"
 
 mkdir ~/risingwave-deploy
 
@@ -63,33 +64,27 @@ cp ci/risedev-components.ci.benchmark.env risedev-components.user.env
 
 echo "--- Download necessary tools"
 apt-get -y install golang-go librdkafka-dev
-
-echo "--- Download cloud cli tool"
 curl -L https://rwc-cli-internal-release.s3.ap-southeast-1.amazonaws.com/download.sh | bash && mv rwc /usr/local/bin
 
-echo "--- rwc config -region"
+echo "--- RWC config and login"
 rwc config -region ap-southeast-1
 rwc config ls
-
-echo "--- rwc login -account"
 rwc login -account benchmark -password "$BENCH_TOKEN"
 
-echo "--- rwc create a sing node risingwave instance"
+echo "--- RWC create a risingwave instance"
 rwc t create -tenant ${TENANT_NAME} -sku SingleNodeBench
 
 sleep 2
 
-echo "--- wait instance ready "
+echo "--- Wait risingwave instance ready "
 endpoint=$(rwc t get-endpoint -tenant ${TENANT_NAME})
 polling ${endpoint}
 
-echo "--- rwc get endpoint"
+echo "--- Generate tpch bech args"
 echo "--frontend-url ${endpoint}" > ~/risingwave-deploy/tpch-bench-args-frontend
 echo "--kafka-addr ${HOST_IP}:29092" >  ~/risingwave-deploy/tpch-bench-args-kafka
 cat ~/risingwave-deploy/tpch-bench-args-frontend
 cat ~/risingwave-deploy/tpch-bench-args-kafka
-
-exit 1
 
 echo "--- Clone tpch-bench repo"
 git clone https://"$GITHUB_TOKEN"@github.com/singularity-data/tpch-bench.git
@@ -98,8 +93,3 @@ echo "--- Run tpc-h bench"
 cd tpch-bench/
 ./scripts/build.sh
 ./scripts/launch_risedev_bench.sh
-
-#sleep 2
-
-#echo "--- delete tenant"
-#rwc t delete -tenant ${tenantname}

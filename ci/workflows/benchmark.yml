@@ -15,7 +15,6 @@ steps:
             - GITHUB_TOKEN
             - BENCH_TOKEN
             - HOST_IP
-            - TENANT_NAME
     agents:
       queue: "benchmark"
     timeout_in_minutes: 30
