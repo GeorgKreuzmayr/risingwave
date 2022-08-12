@@ -148,5 +148,10 @@
     LogicalProject { exprs: [] }
       LogicalScan { table: t, columns: [t._row_id] }
 - sql: |
+    /* disallow subquery in values */
     values(1, (select 1));
   binder_error: 'Bind error: VALUES is disallowed to have subqueries.'
+- sql: |
+    /* disallow correlated_input_ref in values */
+    create table t(v1 int);
+    select v1 from t where exists (values(v1));
