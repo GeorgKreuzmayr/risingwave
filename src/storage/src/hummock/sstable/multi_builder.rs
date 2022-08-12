@@ -12,6 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering::SeqCst;
+
 use risingwave_hummock_sdk::key::{Epoch, FullKey};
 use risingwave_pb::hummock::SstableInfo;
 use tokio::task::JoinHandle;
@@ -20,9 +23,9 @@ use crate::hummock::sstable_store::SstableStoreRef;
 use crate::hummock::utils::MemoryTracker;
 use crate::hummock::value::HummockValue;
 use crate::hummock::{
-    CachePolicy, HummockResult, InMemSstableWriter, InMemWriterBuilder, SstableBuilder,
-    SstableBuilderOptions, SstableWriter, SstableWriterBuilder, StreamingSstableWriter,
-    StreamingWriterBuilder,
+    CachePolicy, HummockResult, InMemSstableWriter, InMemWriterBuilder, MemoryLimiter,
+    SstableBuilder, SstableBuilderOptions, SstableWriter, SstableWriterBuilder,
+    StreamingSstableWriter, StreamingWriterBuilder,
 };
 
 /// Factory for new [`SstableBuilder`] inside the `CapacitySplitTableBuilder`.
@@ -301,60 +304,57 @@ pub fn get_sst_writer_and_sealer_for_streaming_upload(
     )
 }
 
+/// For unit tests and benchmarks.
+pub struct LocalTableBuilderFactory<B>
+where
+    B: SstableWriterBuilder,
+{
+    next_id: AtomicU64,
+    options: SstableBuilderOptions,
+    limiter: MemoryLimiter,
+    writer_builder: B,
+}
+
+impl<B> LocalTableBuilderFactory<B>
+where
+    B: SstableWriterBuilder,
+{
+    pub fn new(next_id: u64, writer_builder: B, options: SstableBuilderOptions) -> Self {
+        Self {
+            limiter: MemoryLimiter::new(1000000),
+            next_id: AtomicU64::new(next_id),
+            options,
+            writer_builder,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<B> TableBuilderFactory<B> for LocalTableBuilderFactory<B>
+where
+    B: SstableWriterBuilder,
+{
+    async fn open_builder(&self) -> HummockResult<(MemoryTracker, SstableBuilder<B::Writer>)> {
+        let tracker = self.limiter.require_memory(1).await.unwrap();
+        let id = self.next_id.fetch_add(1, SeqCst);
+        let builder = SstableBuilder::new(
+            id,
+            self.writer_builder.build(id).await?,
+            self.options.clone(),
+        );
+        Ok((tracker, builder))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::AtomicU64;
-    use std::sync::atomic::Ordering::SeqCst;
-
     use super::*;
     use crate::hummock::iterator::test_utils::mock_sstable_store;
     use crate::hummock::sstable::utils::CompressionAlgorithm;
     use crate::hummock::test_utils::default_builder_opt_for_test;
     use crate::hummock::{
-        InMemWriterBuilder, MemoryLimiter, SstableBuilderOptions, SstableWriterBuilder,
-        DEFAULT_RESTART_INTERVAL,
+        InMemWriterBuilder, SstableBuilderOptions, SstableWriterBuilder, DEFAULT_RESTART_INTERVAL,
     };
-
-    pub struct LocalTableBuilderFactory<B>
-    where
-        B: SstableWriterBuilder,
-    {
-        next_id: AtomicU64,
-        options: SstableBuilderOptions,
-        limiter: MemoryLimiter,
-        writer_builder: B,
-    }
-
-    impl<B> LocalTableBuilderFactory<B>
-    where
-        B: SstableWriterBuilder,
-    {
-        pub fn new(next_id: u64, writer_builder: B, options: SstableBuilderOptions) -> Self {
-            Self {
-                limiter: MemoryLimiter::new(1000000),
-                next_id: AtomicU64::new(next_id),
-                options,
-                writer_builder,
-            }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl<B> TableBuilderFactory<B> for LocalTableBuilderFactory<B>
-    where
-        B: SstableWriterBuilder,
-    {
-        async fn open_builder(&self) -> HummockResult<(MemoryTracker, SstableBuilder<B::Writer>)> {
-            let tracker = self.limiter.require_memory(1).await.unwrap();
-            let id = self.next_id.fetch_add(1, SeqCst);
-            let builder = SstableBuilder::new(
-                id,
-                self.writer_builder.build(id).await?,
-                self.options.clone(),
-            );
-            Ok((tracker, builder))
-        }
-    }
 
     fn get_capacity_split_builder_for_batch_upload(
         opt: SstableBuilderOptions,
